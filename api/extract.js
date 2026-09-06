@@ -55,7 +55,7 @@ async function detectSupplier(base64Image) {
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
+      model: "claude-haiku-4-5",
       max_tokens: 50,
       messages: [{
         role: "user",
@@ -76,7 +76,7 @@ async function extractWithAzure(base64Image, modelId) {
   const key = process.env.AZURE_DOCUMENT_INTELLIGENCE_KEY;
 
   // Submit analysis job
-  const analyzeUrl = `${endpoint}documentintelligence/documentModels/${modelId}:analyze?api-version=2024-02-29-preview`;
+  const analyzeUrl = `${endpoint}documentintelligence/documentModels/${modelId}:analyze?api-version=2024-11-30`;
   const submitRes = await fetch(analyzeUrl, {
     method: "POST",
     headers: {
@@ -213,7 +213,7 @@ RULES:
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-5-20251001",
+      model: "claude-sonnet-4-5",
       max_tokens: 1000,
       messages: [{
         role: "user",
