@@ -213,7 +213,11 @@ RULES:
     })
   });
 
-  if (!response.ok) throw new Error("Claude API error");
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error("Claude API error:", response.status, errText);
+    throw new Error(`Claude API error: ${response.status} ${errText}`);
+  }
   const data = await response.json();
   const text = data.content?.map(c => c.text || "").join("") || "{}";
   try {
