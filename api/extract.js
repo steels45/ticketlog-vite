@@ -46,6 +46,7 @@ export default async function handler(req, res) {
 
 // ── SUPPLIER DETECTION ────────────────────────────────────────────────────
 async function detectSupplier(base64Image) {
+  const supMediaType = base64Image.startsWith('iVBORw') ? 'image/png' : 'image/jpeg';
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -59,7 +60,7 @@ async function detectSupplier(base64Image) {
       messages: [{
         role: "user",
         content: [
-          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64Image } },
+          { type: "image", source: { type: "base64", media_type: supMediaType, data: base64Image } },
           { type: "text", text: "What company issued this ticket? Reply with ONLY the company name, nothing else. Examples: APAC, Amrize, ScaleHouse, Terral, Magnolia, Superior, G&W" }
         ]
       }]
@@ -193,6 +194,17 @@ RULES:
 - receivedStamp: true only if rubber/ink stamp visible
 - null for any field not found`;
 
+  // Auto-detect media type from base64 header
+  function detectMediaType(base64) {
+    if (base64.startsWith('/9j/')) return 'image/jpeg';
+    if (base64.startsWith('iVBORw')) return 'image/png';
+    if (base64.startsWith('R0lGOD')) return 'image/gif';
+    if (base64.startsWith('UklGR')) return 'image/webp';
+    return 'image/jpeg'; // default
+  }
+
+  const mediaType = detectMediaType(base64Image);
+
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -206,7 +218,7 @@ RULES:
       messages: [{
         role: "user",
         content: [
-          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64Image } },
+          { type: "image", source: { type: "base64", media_type: mediaType, data: base64Image } },
           { type: "text", text: PROMPT }
         ]
       }]
