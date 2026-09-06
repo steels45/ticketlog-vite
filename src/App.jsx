@@ -45,7 +45,7 @@ function periodLabel(period) {
 // ── SCANNER CONSTANTS ─────────────────────────────────────────────────────
 const MAX_LONG_EDGE = 2000;
 const JPEG_QUALITY = 0.85;
-const STABILITY_MS = 800;
+const STABILITY_MS = 600; // reduced from 800ms
 
 // ── LIVE DOCUMENT SCANNER (powered by Scanic) ─────────────────────────────
 function LiveDocumentScanner({ onCapture, onClose }) {
@@ -58,8 +58,8 @@ function LiveDocumentScanner({ onCapture, onClose }) {
   const stableRef = useRef({ corners: null, since: null });
   const smoothRef = useRef([]);
   const lockedRef = useRef(null);
-  const SMOOTH_FRAMES = 4;
-  const CONFIRM_FRAMES = 3;
+  const SMOOTH_FRAMES = 3; // reduced from 4
+  const CONFIRM_FRAMES = 2; // reduced from 3 — show outline faster
   const LOCK_DRIFT = 30;
 
   const [status, setStatus] = useState("Initializing camera…");
@@ -127,7 +127,7 @@ function LiveDocumentScanner({ onCapture, onClose }) {
   // Detection loop using persistent Scanner instance
   useEffect(() => {
     if (!scanicReady || !scannerRef.current) return;
-    const INTERVAL = 1000 / 8; // 8fps
+    const INTERVAL = 1000 / 12; // 12fps — faster tracking
     let lastRun = 0;
 
     async function detect(now) {
@@ -163,14 +163,22 @@ function LiveDocumentScanner({ onCapture, onClose }) {
         });
         console.log("Scan result:", result?.success, result?.score?.toFixed(2), result?.corners?.topLeft);
         if (result.success && result.corners && (result.score === undefined || result.score > 0.5)) {
-          // Scanic returns named corners: topLeft, topRight, bottomRight, bottomLeft
           const c = result.corners;
-          rawCorners = [
+          const raw = [
             { x: c.topLeft.x, y: c.topLeft.y },
             { x: c.topRight.x, y: c.topRight.y },
             { x: c.bottomRight.x, y: c.bottomRight.y },
             { x: c.bottomLeft.x, y: c.bottomLeft.y },
           ];
+          // Expand corners outward from center by ~12px to compensate for
+          // DocCornerNet's conservative boundary detection on light backgrounds
+          const EXPAND = 12;
+          const cx = raw.reduce((s, p) => s + p.x, 0) / 4;
+          const cy = raw.reduce((s, p) => s + p.y, 0) / 4;
+          rawCorners = raw.map(p => ({
+            x: p.x + (p.x >= cx ? EXPAND : -EXPAND),
+            y: p.y + (p.y >= cy ? EXPAND : -EXPAND),
+          }));
         }
       } catch {}
 
@@ -199,7 +207,7 @@ function LiveDocumentScanner({ onCapture, onClose }) {
           const drift = smoothedCorners.reduce((max, c, i) =>
             Math.max(max, Math.abs(c.x - locked[i].x), Math.abs(c.y - locked[i].y)), 0);
           lockedRef.current = drift < LOCK_DRIFT
-            ? locked.map((lc, i) => ({ x: lc.x * 0.6 + smoothedCorners[i].x * 0.4, y: lc.y * 0.6 + smoothedCorners[i].y * 0.4 }))
+            ? locked.map((lc, i) => ({ x: lc.x * 0.4 + smoothedCorners[i].x * 0.6, y: lc.y * 0.4 + smoothedCorners[i].y * 0.6 }))
             : smoothedCorners;
         } else {
           lockedRef.current = smoothedCorners;
