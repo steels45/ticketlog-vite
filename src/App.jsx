@@ -66,6 +66,8 @@ function LiveDocumentScanner({ onCapture, onClose }) {
   const [detected, setDetected] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [scanicReady, setScanicReady] = useState(false);
+  const [stabilityProgress, setStabilityProgress] = useState(0); // 0-1
+  const [flash, setFlash] = useState(false);
   const [error, setError] = useState(null);
 
   // Load Scanic Scanner instance
@@ -74,16 +76,14 @@ function LiveDocumentScanner({ onCapture, onClose }) {
     async function loadScanic() {
       try {
         const { Scanner } = await import("scanic");
-        console.log("Scanic imported OK");
         const scanner = new Scanner();
         await scanner.initialize();
-        console.log("Scanic initialized OK");
         if (!cancelled) {
           scannerRef.current = scanner;
           setScanicReady(true);
         }
       } catch (err) {
-        console.warn("Scanic failed to load:", err);
+        // Scanic failed to load silently
       }
     }
     loadScanic();
@@ -137,12 +137,8 @@ function LiveDocumentScanner({ onCapture, onClose }) {
 
       const video = videoRef.current;
       const canvas = canvasRef.current;
-      if (!video || !canvas || video.readyState < 2 || capturing) {
-        console.log("Loop skip:", !video, !canvas, video?.readyState, capturing);
-        return;
-      }
+      if (!video || !canvas || video.readyState < 2 || capturing) return;
 
-      console.log("Running scan frame", video.videoWidth, video.videoHeight);
 
       const vw = video.videoWidth, vh = video.videoHeight;
       if (!vw || !vh) return;
@@ -161,7 +157,6 @@ function LiveDocumentScanner({ onCapture, onClose }) {
             assetBaseUrl: "/",
           },
         });
-        console.log("Scan result:", result?.success, result?.score?.toFixed(2), result?.corners?.topLeft);
         if (result.success && result.corners && (result.score === undefined || result.score > 0.5)) {
           const c = result.corners;
           const raw = [
@@ -225,16 +220,26 @@ function LiveDocumentScanner({ onCapture, onClose }) {
         const same = s.corners && displayCorners.every((c, i) =>
           Math.abs(c.x - s.corners[i].x) < 8 && Math.abs(c.y - s.corners[i].y) < 8
         );
-        if (same && Date.now() - s.since >= STABILITY_MS) {
-          stableRef.current = { corners: null, since: null };
-          doCapture(displayCorners, canvas, vw, vh);
-        } else if (!same) {
+        if (same) {
+          const elapsed = Date.now() - s.since;
+          const progress = Math.min(elapsed / STABILITY_MS, 1);
+          setStabilityProgress(progress);
+          if (elapsed >= STABILITY_MS) {
+            stableRef.current = { corners: null, since: null };
+            setStabilityProgress(0);
+            setFlash(true);
+            setTimeout(() => setFlash(false), 150);
+            doCapture(displayCorners, canvas, vw, vh);
+          }
+        } else {
           stableRef.current = { corners: displayCorners, since: Date.now() };
+          setStabilityProgress(0);
         }
         setDetected(true);
-        setStatus("Hold steady…");
+        setStatus("Hold still…");
       } else {
         stableRef.current = { corners: null, since: null };
+        setStabilityProgress(0);
         setDetected(false);
         setStatus("Point camera at ticket");
       }
@@ -322,6 +327,10 @@ function LiveDocumentScanner({ onCapture, onClose }) {
       <video ref={videoRef} style={SS.video} playsInline muted autoPlay />
       <svg ref={overlayRef} style={SS.overlay} />
 
+      {/* White flash on capture */}
+      {flash && <div style={SS.flashOverlay}/>}
+
+      {/* Guide corners when no detection */}
       {!detected && !capturing && (
         <div style={SS.guideFrame}>
           <div style={{...SS.guideCorner,...SS.guideCornerTL}}/>
@@ -331,6 +340,7 @@ function LiveDocumentScanner({ onCapture, onClose }) {
         </div>
       )}
 
+      {/* Status bar */}
       <div style={SS.statusBar}>
         <div style={{...SS.statusDot,...(detected ? SS.statusDotGreen : {})}}/>
         <span style={SS.statusText}>{error || status}</span>
@@ -339,12 +349,30 @@ function LiveDocumentScanner({ onCapture, onClose }) {
         )}
       </div>
 
-      {detected && !capturing && (
-        <div style={SS.stabilityWrap}>
-          <div style={SS.stabilityBar}/>
+      {/* Circular progress ring — shown during stability check */}
+      {detected && !capturing && stabilityProgress > 0 && (
+        <div style={SS.ringWrap}>
+          <svg width="80" height="80" viewBox="0 0 80 80">
+            {/* Track */}
+            <circle cx="40" cy="40" r="34" fill="none"
+              stroke="rgba(255,255,255,0.2)" strokeWidth="6"/>
+            {/* Progress arc */}
+            <circle cx="40" cy="40" r="34" fill="none"
+              stroke="#1e3a5f" strokeWidth="6"
+              strokeLinecap="round"
+              strokeDasharray={`${2 * Math.PI * 34}`}
+              strokeDashoffset={`${2 * Math.PI * 34 * (1 - stabilityProgress)}`}
+              transform="rotate(-90 40 40)"
+              style={{transition:"stroke-dashoffset 0.05s linear"}}
+            />
+            {/* Center dot */}
+            <circle cx="40" cy="40" r="8" fill="#22c55e"/>
+          </svg>
+          <div style={SS.ringLabel}>Hold still…</div>
         </div>
       )}
 
+      {/* Controls */}
       <div style={SS.controls}>
         <button style={SS.closeBtn} onClick={onClose}>✕ Cancel</button>
         <button style={{...SS.captureBtn,...(capturing ? SS.captureBtnCapturing : {})}}
@@ -373,8 +401,11 @@ const SS = {
   statusDotGreen: { background:"#22c55e", boxShadow:"0 0 6px #22c55e" },
   statusText: { color:"#fff", fontSize:14, fontWeight:600 },
   loadingBadge: { marginLeft:"auto", fontSize:11, color:"rgba(255,255,255,.6)", background:"rgba(255,255,255,.1)", padding:"3px 10px", borderRadius:20 },
-  stabilityWrap: { position:"absolute", bottom:120, left:"50%", transform:"translateX(-50%)", width:160, height:4, background:"rgba(255,255,255,.2)", borderRadius:4, overflow:"hidden" },
-  stabilityBar: { height:"100%", background:"#22c55e", borderRadius:4, animation:`stabilityFill ${STABILITY_MS}ms linear forwards` },
+  stabilityWrap: { display:"none" }, // replaced by ring
+  stabilityBar: { display:"none" }, // replaced by ring
+  flashOverlay: { position:"absolute", inset:0, background:"#fff", zIndex:10, opacity:0.85, pointerEvents:"none" },
+  ringWrap: { position:"absolute", top:"50%", left:"50%", transform:"translate(-50%,-50%)", display:"flex", flexDirection:"column", alignItems:"center", gap:10, pointerEvents:"none" },
+  ringLabel: { color:"#fff", fontSize:15, fontWeight:700, textShadow:"0 1px 4px rgba(0,0,0,0.5)", letterSpacing:"0.02em" },
   controls: { position:"absolute", bottom:0, left:0, right:0, padding:"20px 20px 40px", display:"flex", alignItems:"center", justifyContent:"space-between", background:"linear-gradient(to top, rgba(0,0,0,0.7), transparent)" },
   closeBtn: { background:"rgba(255,255,255,.15)", border:"none", color:"#fff", fontWeight:600, fontSize:14, padding:"10px 16px", borderRadius:20, cursor:"pointer" },
   captureBtn: { width:72, height:72, borderRadius:"50%", background:"transparent", border:"none", cursor:"pointer", padding:0 },
