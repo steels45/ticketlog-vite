@@ -495,8 +495,8 @@ RULES:
 - If a field is not visible or blank, return null
 
 SIGNATURE & STAMP DETECTION:
-- signaturePresent: true if ANY handwritten signature is visible anywhere on the ticket
-- stampPresent: true if ANY rubber stamp or ink stamp is visible (e.g. "RECEIVED", "APPROVED")
+- receiverSignature: true if ANY handwritten signature is visible anywhere on the ticket
+- receivedStamp: true if ANY rubber stamp or ink stamp is visible (e.g. "RECEIVED", "APPROVED")
 - A printed name is NOT a signature. Look for actual ink marks.
 
 Return ONLY valid JSON, no markdown, no explanation:
@@ -506,16 +506,19 @@ Return ONLY valid JSON, no markdown, no explanation:
   "date": "date from ticket",
   "time": "time from ticket",
   "customer": "customer or bill-to name",
-  "jobNumber": "job#, order#, or PO number",
-  "location": "job site, delivery location, or pit address",
+  "orderNumber": "order#, job#, or work order number",
+  "poNumber": "PO number if present",
+  "jobSite": "delivery location or job site name",
+  "location": "pit or yard location/address",
   "truckNumber": "truck, vehicle, or unit number",
-  "material": "material type",
-  "grossWeight": "gross weight with unit",
-  "tareWeight": "tare weight with unit",
+  "carrierName": "hauling company name",
+  "product": "material type",
+  "grossTons": "gross weight in tons as decimal",
+  "tareTons": "tare weight in tons as decimal",
   "netTons": "net weight in tons as decimal number only",
   "weighmaster": "weighmaster name if present",
-  "signaturePresent": true or false,
-  "stampPresent": true or false,
+  "receiverSignature": true or false,
+  "receivedStamp": true or false,
   "notes": "any other relevant info"
 }`;
 
@@ -534,7 +537,7 @@ function buildFlags(ticket, allTickets) {
   const flags = [];
   if (ticket.blurScore !== null && ticket.blurScore < 80)
     flags.push({ id:"blur", label:"Blurry image", icon:"📷", color:"#d97706" });
-  if (ticket.data?.signaturePresent===false && ticket.data?.stampPresent===false)
+  if (ticket.data?.receiverSignature===false && ticket.data?.receivedStamp===false)
     flags.push({ id:"nosig", label:"No signature or stamp", icon:"✍️", color:"#dc2626" });
   if (ticket.data?.ticketNumber) {
     const dup = allTickets.find(t=>t.id!==ticket.id&&t.data?.ticketNumber===ticket.data.ticketNumber&&t.data?.supplier===ticket.data.supplier);
@@ -556,14 +559,16 @@ function buildFlags(ticket, allTickets) {
 
 // ── EXPORTS ───────────────────────────────────────────────────────────────
 function exportCSV(tickets) {
-  const headers = ["Load #","Driver","Captured Date","Captured Time","Supplier","Ticket #","Ticket Date","Customer","Job/PO #","Location","Truck #","Material","Gross Weight","Tare Weight","Net Tons","Weighmaster","GPS Lat","GPS Lng","Signature","Stamp","Flags","Notes"];
+  const headers = ["Load #","Driver","Captured Date","Captured Time","Supplier","Ticket #","Ticket Date","Ticket Time","Customer","Order #","PO Number","Job Site","Location","Truck #","Carrier","Material","Gross Tons","Tare Tons","Net Tons","Weighmaster","GPS Lat","GPS Lng","Receiver Signature","Received Stamp","Flags","Notes"];
   const rows = tickets.map(t=>[
     t.loadNumber, t.driverName, formatDate(t.timestamp), formatTime(t.timestamp),
-    t.data?.supplier||"", t.data?.ticketNumber||"", t.data?.date||"", t.data?.customer||"",
-    t.data?.jobNumber||"", t.data?.location||"", t.data?.truckNumber||"", t.data?.material||"",
-    t.data?.grossWeight||"", t.data?.tareWeight||"", t.data?.netTons||"", t.data?.weighmaster||"",
+    t.data?.supplier||"", t.data?.ticketNumber||"", t.data?.date||"", t.data?.time||"",
+    t.data?.customer||"", t.data?.orderNumber||"", t.data?.poNumber||"",
+    t.data?.jobSite||"", t.data?.location||"", t.data?.truckNumber||"",
+    t.data?.carrierName||"", t.data?.product||"",
+    t.data?.grossTons||"", t.data?.tareTons||"", t.data?.netTons||"", t.data?.weighmaster||"",
     t.gps?.latitude||"", t.gps?.longitude||"",
-    t.data?.signaturePresent?"Yes":"No", t.data?.stampPresent?"Yes":"No",
+    t.data?.receiverSignature?"Yes":"No", t.data?.receivedStamp?"Yes":"No",
     (t.flags||[]).map(f=>f.label).join("; "), t.data?.notes||""
   ]);
   const csv=[headers,...rows].map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
@@ -590,7 +595,7 @@ function exportImagePDF(tickets, label, broker=null) {
         <span class="ts">${formatDateShort(t.timestamp)} ${formatTime(t.timestamp)}</span>
       </div>
       <div class="iw"><img src="${img}" /></div>
-      <div class="pf">Net Tons: <strong>${t.data?.netTons||"—"}</strong> · Truck: <strong>${t.data?.truckNumber||"—"}</strong> · Material: <strong>${t.data?.material||"—"}</strong>${(t.flags||[]).length>0?` · <span style="color:#d97706">⚠️ ${t.flags.map(f=>f.label).join(", ")}</span>`:""}</div>
+      <div class="pf">Net Tons: <strong>${t.data?.netTons||"—"}</strong> · Truck: <strong>${t.data?.truckNumber||"—"}</strong> · Material: <strong>${t.data?.product||"—"}</strong>${(t.flags||[]).length>0?` · <span style="color:#d97706">⚠️ ${t.flags.map(f=>f.label).join(", ")}</span>`:""}</div>
     </div>`;
   }).join("");
   const totalTons=sorted.reduce((s,t)=>s+(parseFloat(t.data?.netTons)||0),0);
@@ -633,10 +638,23 @@ const DEFAULT_ADMIN_PIN = "99999";
 
 // ── FIELD LABELS ──────────────────────────────────────────────────────────
 const FIELD_LABELS = {
-  supplier:"Supplier / Pit", ticketNumber:"Ticket #", date:"Date", time:"Time",
-  customer:"Customer", jobNumber:"Job / PO #", location:"Location / Site",
-  truckNumber:"Truck #", material:"Material", grossWeight:"Gross Weight",
-  tareWeight:"Tare Weight", netTons:"Net Tons", weighmaster:"Weighmaster", notes:"Notes",
+  supplier: "Supplier / Pit",
+  ticketNumber: "Ticket #",
+  date: "Date",
+  time: "Time",
+  customer: "Customer",
+  orderNumber: "Order #",
+  poNumber: "PO Number",
+  jobSite: "Job Site",
+  location: "Location",
+  truckNumber: "Truck #",
+  carrierName: "Carrier",
+  product: "Material",
+  grossTons: "Gross Tons",
+  tareTons: "Tare Tons",
+  netTons: "Net Tons",
+  weighmaster: "Weighmaster",
+  notes: "Notes",
 };
 
 // ── APP ───────────────────────────────────────────────────────────────────
@@ -1257,14 +1275,14 @@ export default function App() {
                     <div style={S.dupWarningText}>Already submitted by <strong>{duplicateWarning.submittedBy}</strong> at {formatTime(duplicateWarning.submittedAt)}. Verify before saving.</div>
                   </div>
                 )}
-                {editData.signaturePresent===false&&editData.stampPresent===false&&(
+                {editData.receiverSignature===false&&editData.receivedStamp===false&&(
                   <div style={{...S.warnChip,borderColor:"#fca5a5",background:"#fef2f2"}}>
                     <span>✍️</span>
                     <span style={{fontSize:13,color:"#dc2626",fontWeight:600}}>No signature or stamp detected — ticket will be flagged</span>
                   </div>
                 )}
                 <div style={S.fieldsGrid}>
-                  {Object.entries(FIELD_LABELS).filter(([k])=>k!=="signaturePresent"&&k!=="stampPresent").map(([key,label])=>(
+                  {Object.entries(FIELD_LABELS).map(([key,label])=>(
                     <div key={key} style={key==="notes"||key==="location"||key==="customer"?{...S.fieldWrap,gridColumn:"span 2"}:S.fieldWrap}>
                       <label style={S.fieldLabel}>{label}</label>
                       <input style={S.fieldInput} value={editData[key]||""}
@@ -1758,7 +1776,7 @@ function DriverTicketCard({ticket,onClick}) {
         {ticket.data?.netTons&&<div style={S.driverTicketTons}>{ticket.data.netTons} <span style={{fontSize:12,fontWeight:500,color:"#64748b"}}>tons</span></div>}
         <div style={S.driverTicketMeta}>
           {ticket.data?.truckNumber&&<span>🚛 {ticket.data.truckNumber}</span>}
-          {ticket.data?.material&&<span>📦 {ticket.data.material}</span>}
+          {ticket.data?.product&&<span>📦 {ticket.data.product}</span>}
         </div>
         <div style={S.driverTicketTime}>{formatDateShort(ticket.timestamp)} · {formatTime(ticket.timestamp)}</div>
       </div>
@@ -1786,7 +1804,7 @@ function AdminTicketCard({ticket,brokers,onClick}) {
         <div style={S.adminTicketBottom}>
           {ticket.data?.netTons&&<span style={{fontWeight:700,color:C.navy}}>{ticket.data.netTons}t</span>}
           {ticket.data?.truckNumber&&<span>{ticket.data.truckNumber}</span>}
-          {ticket.data?.material&&<span>{ticket.data.material}</span>}
+          {ticket.data?.product&&<span>{ticket.data.product}</span>}
         </div>
         <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:4,alignItems:"center"}}>
           {ticket.broker?(
