@@ -48,7 +48,7 @@ const JPEG_QUALITY = 0.85;
 const STABILITY_MS = 600; // reduced from 800ms
 
 // ── LIVE DOCUMENT SCANNER (powered by Scanic) ─────────────────────────────
-function LiveDocumentScanner({ onCapture, onClose }) {
+function LiveDocumentScanner({ onCapture, onClose, stabilityMs = 800, autoCapture = true }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayRef = useRef(null);
@@ -222,9 +222,9 @@ function LiveDocumentScanner({ onCapture, onClose }) {
         );
         if (same) {
           const elapsed = Date.now() - s.since;
-          const progress = Math.min(elapsed / STABILITY_MS, 1);
+          const progress = Math.min(elapsed / stabilityMs, 1);
           setStabilityProgress(progress);
-          if (elapsed >= STABILITY_MS) {
+          if (autoCapture && elapsed >= stabilityMs) {
             stableRef.current = { corners: null, since: null };
             setStabilityProgress(0);
             setFlash(true);
@@ -236,7 +236,7 @@ function LiveDocumentScanner({ onCapture, onClose }) {
           setStabilityProgress(0);
         }
         setDetected(true);
-        setStatus("Hold still…");
+        setStatus(autoCapture ? "Hold still…" : "Tap to capture");
       } else {
         stableRef.current = { corners: null, since: null };
         setStabilityProgress(0);
@@ -655,6 +655,13 @@ export default function App() {
   // Admin
   const [adminTab, setAdminTab] = useState("tickets"); // tickets | export | roster
   const [adminPeriodOffset, setAdminPeriodOffset] = useState(0);
+  const [showSettings, setShowSettings] = useState(false);
+  // App settings (loaded from Supabase app_settings table)
+  const [enhancementMode, setEnhancementMode] = useState("auto"); // off | auto | high
+  const [autoCapture, setAutoCapture] = useState(true);
+  const [stabilityMs, setStabilityMs] = useState(800);
+  const [defaultImageView, setDefaultImageView] = useState("enhanced"); // enhanced | raw
+  const [settingsSaved, setSettingsSaved] = useState(false);
   const [brokerFilter, setBrokerFilter] = useState("all"); // all | unassigned | broker name
   // Brokers
   const [brokers, setBrokers] = useState([]);
@@ -705,6 +712,14 @@ export default function App() {
         if (drivers?.length) setRoster(drivers.map(d=>({name:d.name,pin:d.pin})));
         const { data: brokerData } = await supabase.from("brokers").select("*").order("name");
         if (brokerData?.length) setBrokers(brokerData);
+        // Load app settings
+        const { data: settings } = await supabase.from("app_settings").select("*").eq("id",1).single();
+        if (settings) {
+          setEnhancementMode(settings.enhancement_mode || "auto");
+          setAutoCapture(settings.auto_capture !== false);
+          setStabilityMs(settings.stability_ms || 800);
+          setDefaultImageView(settings.default_image_view || "enhanced");
+        }
         const ap = localStorage.getItem("adminPin");
         if (ap) setAdminPin(ap);
         const sess = localStorage.getItem("session");
@@ -808,6 +823,21 @@ export default function App() {
     } catch {}
   }
 
+  async function saveAppSettings() {
+    try {
+      await supabase.from("app_settings").upsert({
+        id: 1,
+        enhancement_mode: enhancementMode,
+        auto_capture: autoCapture,
+        stability_ms: stabilityMs,
+        default_image_view: defaultImageView,
+        updated_at: new Date().toISOString(),
+      });
+      setSettingsSaved(true);
+      setTimeout(() => setSettingsSaved(false), 2000);
+    } catch {}
+  }
+
   async function assignBroker(ticketId, brokerName) {
     try {
       await supabase.from("tickets").update({ broker: brokerName }).eq("id", ticketId);
@@ -834,10 +864,14 @@ export default function App() {
       const img = new Image();
       img.onload = () => {
         const w = img.width, h = img.height;
-        const raw = dataUrl; // always keep original
+        const raw = dataUrl;
+
+        if (enhancementMode === "off") {
+          resolve({ raw, enhanced: raw, enhancementApplied: "off" });
+          return;
+        }
 
         // ── Step 1: Border cleanup ──────────────────────────────────────────
-        // Trim 5px inward from each edge
         const TRIM = 5;
         const trimCanvas = document.createElement("canvas");
         trimCanvas.width = w - TRIM * 2;
@@ -845,54 +879,76 @@ export default function App() {
         const trimCtx = trimCanvas.getContext("2d");
         trimCtx.drawImage(img, TRIM, TRIM, w - TRIM*2, h - TRIM*2, 0, 0, w - TRIM*2, h - TRIM*2);
 
-        // Sample 10px border strip — if not white/near-white, replace with white
         const borderSample = trimCtx.getImageData(0, 0, trimCanvas.width, 10);
         const avgR = borderSample.data.reduce((s,v,i)=>i%4===0?s+v:s,0) / (borderSample.data.length/4);
         const avgG = borderSample.data.reduce((s,v,i)=>i%4===1?s+v:s,0) / (borderSample.data.length/4);
         const avgB = borderSample.data.reduce((s,v,i)=>i%4===2?s+v:s,0) / (borderSample.data.length/4);
         const isWhiteBorder = avgR > 215 && avgG > 215 && avgB > 215;
-
         if (!isWhiteBorder) {
-          // Fill border strip with white
           trimCtx.fillStyle = "#ffffff";
-          trimCtx.fillRect(0, 0, trimCanvas.width, 8); // top
-          trimCtx.fillRect(0, trimCanvas.height - 8, trimCanvas.width, 8); // bottom
-          trimCtx.fillRect(0, 0, 8, trimCanvas.height); // left
-          trimCtx.fillRect(trimCanvas.width - 8, 0, 8, trimCanvas.height); // right
+          trimCtx.fillRect(0, 0, trimCanvas.width, 8);
+          trimCtx.fillRect(0, trimCanvas.height - 8, trimCanvas.width, 8);
+          trimCtx.fillRect(0, 0, 8, trimCanvas.height);
+          trimCtx.fillRect(trimCanvas.width - 8, 0, 8, trimCanvas.height);
         }
 
-        // ── Step 2: Auto enhancement ────────────────────────────────────────
         const enhCanvas = document.createElement("canvas");
         enhCanvas.width = trimCanvas.width;
         enhCanvas.height = trimCanvas.height;
         const enhCtx = enhCanvas.getContext("2d");
         enhCtx.drawImage(trimCanvas, 0, 0);
 
-        const imageData = enhCtx.getImageData(0, 0, enhCanvas.width, enhCanvas.height);
-        const d = imageData.data;
-
-        // Find min/max luminance for contrast stretch
-        let minL = 255, maxL = 0;
-        for (let i = 0; i < d.length; i += 4) {
-          const l = 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2];
-          if (l < minL) minL = l;
-          if (l > maxL) maxL = l;
-        }
-        const range = maxL - minL || 1;
-
-        for (let i = 0; i < d.length; i += 4) {
-          for (let c = 0; c < 3; c++) {
-            // Stretch contrast
-            let v = (d[i+c] - minL) / range * 255;
-            // Mild S-curve — push whites whiter, darks darker
-            v = v < 128 ? v * 0.88 : 128 + (v - 128) * 1.12;
-            d[i+c] = Math.min(255, Math.max(0, Math.round(v)));
+        if (enhancementMode === "auto") {
+          // ── Auto: contrast stretch ──────────────────────────────────────
+          const imageData = enhCtx.getImageData(0, 0, enhCanvas.width, enhCanvas.height);
+          const d = imageData.data;
+          let minL = 255, maxL = 0;
+          for (let i = 0; i < d.length; i += 4) {
+            const l = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+            if (l < minL) minL = l;
+            if (l > maxL) maxL = l;
           }
+          const range = maxL - minL || 1;
+          for (let i = 0; i < d.length; i += 4) {
+            for (let c = 0; c < 3; c++) {
+              let v = (d[i+c] - minL) / range * 255;
+              v = v < 128 ? v * 0.88 : 128 + (v - 128) * 1.12;
+              d[i+c] = Math.min(255, Math.max(0, Math.round(v)));
+            }
+          }
+          enhCtx.putImageData(imageData, 0, 0);
+        } else if (enhancementMode === "high") {
+          // ── High: grayscale + adaptive threshold ────────────────────────
+          const imageData = enhCtx.getImageData(0, 0, enhCanvas.width, enhCanvas.height);
+          const d = imageData.data;
+          const W = enhCanvas.width, H = enhCanvas.height;
+          // Convert to grayscale
+          const gray = new Uint8Array(W * H);
+          for (let i = 0; i < d.length; i += 4) {
+            gray[i/4] = Math.round(0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2]);
+          }
+          // Simple adaptive threshold — compare to local mean
+          const R = 15; // radius
+          for (let y = 0; y < H; y++) {
+            for (let x = 0; x < W; x++) {
+              let sum = 0, count = 0;
+              for (let dy = -R; dy <= R; dy++) {
+                for (let dx = -R; dx <= R; dx++) {
+                  const nx = x+dx, ny = y+dy;
+                  if (nx>=0&&nx<W&&ny>=0&&ny<H) { sum+=gray[ny*W+nx]; count++; }
+                }
+              }
+              const threshold = sum/count - 8;
+              const val = gray[y*W+x] > threshold ? 255 : 0;
+              const i = (y*W+x)*4;
+              d[i]=d[i+1]=d[i+2]=val; d[i+3]=255;
+            }
+          }
+          enhCtx.putImageData(imageData, 0, 0);
         }
-        enhCtx.putImageData(imageData, 0, 0);
 
         const enhanced = enhCanvas.toDataURL("image/jpeg", 0.92);
-        resolve({ raw, enhanced, enhancementApplied: "auto" });
+        resolve({ raw, enhanced, enhancementApplied: enhancementMode });
       };
       img.onerror = () => resolve({ raw: dataUrl, enhanced: dataUrl, enhancementApplied: "none" });
       img.src = dataUrl;
@@ -1091,6 +1147,8 @@ export default function App() {
           <LiveDocumentScanner
             onCapture={handleScannerCapture}
             onClose={()=>setScannerOpen(false)}
+            stabilityMs={stabilityMs}
+            autoCapture={autoCapture}
           />
         )}
 
@@ -1281,7 +1339,7 @@ export default function App() {
           </div>
         )}
 
-        {selectedTicket&&<TicketModal ticket={selectedTicket} onClose={()=>setSelectedTicket(null)} />}
+        {selectedTicket&&<TicketModal ticket={selectedTicket} onClose={()=>setSelectedTicket(null)} defaultView={defaultImageView} />}
         </div>
 
         {/* Bottom tab bar */}
@@ -1318,8 +1376,96 @@ export default function App() {
               {adminPeriodOffset<0&&<button style={S.periodSmallBtn} onClick={()=>setAdminPeriodOffset(p=>p+1)}>›</button>}
             </div>
           </div>
-          <button style={S.signOutBtn} onClick={handleLogout}>Sign Out</button>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <button style={S.gearBtn} onClick={()=>setShowSettings(true)}>
+              <GearIcon size={20} color="#fff" />
+            </button>
+            <button style={S.signOutBtn} onClick={handleLogout}>Sign Out</button>
+          </div>
         </div>
+
+        {/* Settings screen overlay */}
+        {showSettings && (
+          <div style={S.settingsOverlay}>
+            <div style={S.settingsHeader}>
+              <button style={S.settingsBack} onClick={()=>setShowSettings(false)}>← Back</button>
+              <div style={S.settingsTitle}>App Settings</div>
+            </div>
+            <div style={S.settingsBody}>
+
+              {/* Image Enhancement */}
+              <div style={S.settingsSection}>
+                <div style={S.settingsSectionTitle}>Image Enhancement</div>
+                {[
+                  { value:"off", label:"Off", desc:"Raw scan — no processing" },
+                  { value:"auto", label:"Auto", desc:"Contrast boost + border cleanup" },
+                  { value:"high", label:"High", desc:"Grayscale + adaptive threshold (best for faded/thermal)" },
+                ].map(opt=>(
+                  <button key={opt.value} style={{...S.settingsOption,...(enhancementMode===opt.value?S.settingsOptionActive:{})}}
+                    onClick={()=>setEnhancementMode(opt.value)}>
+                    <div style={{...S.settingsRadio,...(enhancementMode===opt.value?S.settingsRadioActive:{})}}/>
+                    <div>
+                      <div style={S.settingsOptionLabel}>{opt.label}</div>
+                      <div style={S.settingsOptionDesc}>{opt.desc}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+
+              {/* Capture */}
+              <div style={S.settingsSection}>
+                <div style={S.settingsSectionTitle}>Capture</div>
+                <div style={S.settingsRow}>
+                  <div>
+                    <div style={S.settingsOptionLabel}>Auto-capture</div>
+                    <div style={S.settingsOptionDesc}>Capture automatically when ticket is stable</div>
+                  </div>
+                  <button style={{...S.toggle,...(autoCapture?S.toggleOn:{})}} onClick={()=>setAutoCapture(v=>!v)}>
+                    <div style={{...S.toggleThumb,...(autoCapture?S.toggleThumbOn:{})}}/>
+                  </button>
+                </div>
+                <div style={S.settingsSectionTitle}>Stability Time</div>
+                {[
+                  { value:500, label:"Fast", desc:"500ms" },
+                  { value:800, label:"Normal", desc:"800ms" },
+                  { value:1200, label:"Slow", desc:"1200ms" },
+                ].map(opt=>(
+                  <button key={opt.value} style={{...S.settingsOption,...(stabilityMs===opt.value?S.settingsOptionActive:{})}}
+                    onClick={()=>setStabilityMs(opt.value)}>
+                    <div style={{...S.settingsRadio,...(stabilityMs===opt.value?S.settingsRadioActive:{})}}/>
+                    <div>
+                      <div style={S.settingsOptionLabel}>{opt.label}</div>
+                      <div style={S.settingsOptionDesc}>{opt.desc}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+
+              {/* Display */}
+              <div style={S.settingsSection}>
+                <div style={S.settingsSectionTitle}>Display</div>
+                <div style={S.settingsSectionTitle} >Default Image View</div>
+                {[
+                  { value:"enhanced", label:"Enhanced", desc:"Show processed image by default" },
+                  { value:"raw", label:"Raw", desc:"Show original scan by default" },
+                ].map(opt=>(
+                  <button key={opt.value} style={{...S.settingsOption,...(defaultImageView===opt.value?S.settingsOptionActive:{})}}
+                    onClick={()=>setDefaultImageView(opt.value)}>
+                    <div style={{...S.settingsRadio,...(defaultImageView===opt.value?S.settingsRadioActive:{})}}/>
+                    <div>
+                      <div style={S.settingsOptionLabel}>{opt.label}</div>
+                      <div style={S.settingsOptionDesc}>{opt.desc}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+
+              <button style={{...S.solidBtn,width:"100%",marginTop:8}} onClick={saveAppSettings}>
+                {settingsSaved ? "✓ Saved!" : "Save Settings"}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Summary row */}
         <div style={S.adminSummaryRow}>
@@ -1480,7 +1626,7 @@ export default function App() {
             </div>
           )}
         </div>
-        {selectedTicket&&<TicketModal ticket={selectedTicket} onClose={()=>setSelectedTicket(null)} brokers={brokers} onAssignBroker={assignBroker} brokerColorFn={(n)=>brokerColor(brokers,n)} />}
+        {selectedTicket&&<TicketModal ticket={selectedTicket} onClose={()=>setSelectedTicket(null)} defaultView={defaultImageView} brokers={brokers} onAssignBroker={assignBroker} brokerColorFn={(n)=>brokerColor(brokers,n)} />}
       </div>
     );
   }
@@ -1559,6 +1705,15 @@ function InfoIcon() {
 }
 
 // ── COMPONENTS ─────────────────────────────────────────────────────────────
+
+function GearIcon({size=20, color="#fff"}) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+  );
+}
 
 function SummaryCard({label,value,highlight,alert}) {
   const cardStyle = {...S.summaryCard, ...(highlight?{borderColor:C.navy,background:"#eff6ff"}:{}), ...(alert?{borderColor:"#fca5a5",background:"#fef2f2"}:{})};
@@ -1648,9 +1803,15 @@ function AdminTicketCard({ticket,brokers,onClick}) {
   );
 }
 
-function TicketModal({ticket,onClose,brokers,onAssignBroker,brokerColorFn}) {
+function TicketModal({ticket,onClose,brokers,onAssignBroker,brokerColorFn,defaultView="enhanced"}) {
   const gps=ticket.gps;
   const mapsUrl=gps?`https://maps.google.com/?q=${gps.latitude},${gps.longitude}`:null;
+  const hasRaw = !!ticket.imageRaw;
+  const hasEnhanced = !!ticket.imageEnhanced;
+  const [imgView, setImgView] = useState(defaultView);
+  const displayImg = imgView==="raw" && hasRaw ? ticket.imageRaw
+    : imgView==="enhanced" && hasEnhanced ? ticket.imageEnhanced
+    : ticket.image;
   return (
     <div style={S.modalOverlay} onClick={onClose}>
       <div style={S.modal} onClick={e=>e.stopPropagation()}>
@@ -1699,7 +1860,15 @@ function TicketModal({ticket,onClose,brokers,onAssignBroker,brokerColorFn}) {
           </div>
         )}
 
-        <img src={ticket.image} alt="ticket" style={S.modalImg} />
+        <img src={displayImg} alt="ticket" style={S.modalImg} />
+
+        {/* Raw / Enhanced toggle */}
+        {(hasRaw || hasEnhanced) && (
+          <div style={{display:"flex",gap:6,padding:"8px 16px 0"}}>
+            {hasEnhanced&&<button style={{...S.imgToggleBtn,...(imgView==="enhanced"?S.imgToggleBtnActive:{})}} onClick={()=>setImgView("enhanced")}>Enhanced</button>}
+            {hasRaw&&<button style={{...S.imgToggleBtn,...(imgView==="raw"?S.imgToggleBtnActive:{})}} onClick={()=>setImgView("raw")}>Raw</button>}
+          </div>
+        )}
 
         {ticket.data?.netTons&&(
           <div style={S.modalTons}>
@@ -1942,6 +2111,27 @@ const S = {
   loadPill: { fontSize:11, fontWeight:700, color:C.navy, background:"#eff6ff", border:"1px solid #bfdbfe", borderRadius:20, padding:"2px 8px" },
   supplierText: { fontSize:12, color:C.muted, flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
   // Admin
+  gearBtn: { background:"rgba(255,255,255,0.15)", border:"none", borderRadius:8, padding:8, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" },
+  settingsOverlay: { position:"fixed", inset:0, background:C.bg, zIndex:200, overflowY:"auto" },
+  settingsHeader: { background:C.navy, padding:"16px 20px", display:"flex", alignItems:"center", gap:16 },
+  settingsBack: { background:"none", border:"none", color:"rgba(255,255,255,0.8)", fontSize:15, fontWeight:600, cursor:"pointer" },
+  settingsTitle: { fontSize:17, fontWeight:700, color:"#fff" },
+  settingsBody: { padding:20, display:"flex", flexDirection:"column", gap:4 },
+  settingsSection: { background:C.surface, borderRadius:14, padding:16, marginBottom:12, border:`1px solid ${C.border}` },
+  settingsSectionTitle: { fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:10 },
+  settingsOption: { width:"100%", display:"flex", alignItems:"flex-start", gap:12, padding:"10px 0", background:"none", border:"none", borderBottom:`1px solid ${C.border}`, cursor:"pointer", textAlign:"left" },
+  settingsOptionActive: { },
+  settingsRadio: { width:18, height:18, borderRadius:"50%", border:`2px solid ${C.border}`, flexShrink:0, marginTop:2 },
+  settingsRadioActive: { border:`5px solid ${C.navy}`, background:C.surface },
+  settingsOptionLabel: { fontSize:14, fontWeight:600, color:C.text },
+  settingsOptionDesc: { fontSize:12, color:C.muted, marginTop:2 },
+  settingsRow: { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"8px 0", borderBottom:`1px solid ${C.border}`, marginBottom:12 },
+  toggle: { width:44, height:26, borderRadius:13, background:C.border, border:"none", cursor:"pointer", position:"relative", flexShrink:0, transition:"background .2s" },
+  toggleOn: { background:C.navy },
+  toggleThumb: { position:"absolute", top:3, left:3, width:20, height:20, borderRadius:"50%", background:"#fff", transition:"left .2s" },
+  toggleThumbOn: { left:21 },
+  imgToggleBtn: { flex:1, padding:"7px", borderRadius:8, border:`1.5px solid ${C.border}`, background:"transparent", color:C.muted, fontSize:12, fontWeight:600, cursor:"pointer" },
+  imgToggleBtnActive: { background:C.navy, color:"#fff", borderColor:C.navy },
   adminHeader: { background:C.navy, color:"#fff", padding:"16px 20px", display:"flex", alignItems:"center", justifyContent:"space-between" },
   adminHeaderLeft: { display:"flex", flexDirection:"column", gap:4 },
   adminTitle: { fontSize:18, fontWeight:800, color:"#fff" },
