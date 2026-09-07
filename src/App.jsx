@@ -672,6 +672,8 @@ export default function App() {
   // Capture flow
   const [captureStep, setCaptureStep] = useState("idle"); // idle | preview | review
   const [previewImg, setPreviewImg] = useState(null);
+  const [rawImg, setRawImg] = useState(null);
+  const [enhancedImg, setEnhancedImg] = useState(null);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [blurScore, setBlurScore] = useState(null);
   const [blurWarning, setBlurWarning] = useState(false);
@@ -723,6 +725,11 @@ export default function App() {
       if (data) setTickets(data.map(t=>({
         ...t, driverName:t.driver_name, loadNumber:t.load_number,
         blurScore:t.blur_score,
+        imageRaw:t.image_raw,
+        imageEnhanced:t.image_enhanced,
+        enhancementApplied:t.enhancement_applied,
+        // display image: prefer enhanced, fall back to main image
+        image:t.image_enhanced||t.image,
       })));
     } catch {}
   }
@@ -813,10 +820,83 @@ export default function App() {
   function resetCapture() {
     setCaptureStep("idle");
     setPreviewImg(null);
+    setRawImg(null);
+    setEnhancedImg(null);
     setScannerOpen(false);
     setBlurScore(null); setBlurWarning(false);
     setGpsData(null); setGpsStatus("idle");
     setEditData({}); setDuplicateWarning(null); setLoadError(null);
+  }
+
+  // Image processing — returns { raw, enhanced, enhancementApplied }
+  async function processImage(dataUrl) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const w = img.width, h = img.height;
+        const raw = dataUrl; // always keep original
+
+        // ── Step 1: Border cleanup ──────────────────────────────────────────
+        // Trim 5px inward from each edge
+        const TRIM = 5;
+        const trimCanvas = document.createElement("canvas");
+        trimCanvas.width = w - TRIM * 2;
+        trimCanvas.height = h - TRIM * 2;
+        const trimCtx = trimCanvas.getContext("2d");
+        trimCtx.drawImage(img, TRIM, TRIM, w - TRIM*2, h - TRIM*2, 0, 0, w - TRIM*2, h - TRIM*2);
+
+        // Sample 10px border strip — if not white/near-white, replace with white
+        const borderSample = trimCtx.getImageData(0, 0, trimCanvas.width, 10);
+        const avgR = borderSample.data.reduce((s,v,i)=>i%4===0?s+v:s,0) / (borderSample.data.length/4);
+        const avgG = borderSample.data.reduce((s,v,i)=>i%4===1?s+v:s,0) / (borderSample.data.length/4);
+        const avgB = borderSample.data.reduce((s,v,i)=>i%4===2?s+v:s,0) / (borderSample.data.length/4);
+        const isWhiteBorder = avgR > 215 && avgG > 215 && avgB > 215;
+
+        if (!isWhiteBorder) {
+          // Fill border strip with white
+          trimCtx.fillStyle = "#ffffff";
+          trimCtx.fillRect(0, 0, trimCanvas.width, 8); // top
+          trimCtx.fillRect(0, trimCanvas.height - 8, trimCanvas.width, 8); // bottom
+          trimCtx.fillRect(0, 0, 8, trimCanvas.height); // left
+          trimCtx.fillRect(trimCanvas.width - 8, 0, 8, trimCanvas.height); // right
+        }
+
+        // ── Step 2: Auto enhancement ────────────────────────────────────────
+        const enhCanvas = document.createElement("canvas");
+        enhCanvas.width = trimCanvas.width;
+        enhCanvas.height = trimCanvas.height;
+        const enhCtx = enhCanvas.getContext("2d");
+        enhCtx.drawImage(trimCanvas, 0, 0);
+
+        const imageData = enhCtx.getImageData(0, 0, enhCanvas.width, enhCanvas.height);
+        const d = imageData.data;
+
+        // Find min/max luminance for contrast stretch
+        let minL = 255, maxL = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          const l = 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2];
+          if (l < minL) minL = l;
+          if (l > maxL) maxL = l;
+        }
+        const range = maxL - minL || 1;
+
+        for (let i = 0; i < d.length; i += 4) {
+          for (let c = 0; c < 3; c++) {
+            // Stretch contrast
+            let v = (d[i+c] - minL) / range * 255;
+            // Mild S-curve — push whites whiter, darks darker
+            v = v < 128 ? v * 0.88 : 128 + (v - 128) * 1.12;
+            d[i+c] = Math.min(255, Math.max(0, Math.round(v)));
+          }
+        }
+        enhCtx.putImageData(imageData, 0, 0);
+
+        const enhanced = enhCanvas.toDataURL("image/jpeg", 0.92);
+        resolve({ raw, enhanced, enhancementApplied: "auto" });
+      };
+      img.onerror = () => resolve({ raw: dataUrl, enhanced: dataUrl, enhancementApplied: "none" });
+      img.src = dataUrl;
+    });
   }
 
   async function handleScannerCapture(dataUrl) {
@@ -824,9 +904,13 @@ export default function App() {
     setGpsStatus("fetching");
     setBlurScore(null);
     const gpsPromise = getGPSLocation();
-    setPreviewImg(dataUrl);
+    // Process image immediately — border cleanup + enhancement
+    const { raw, enhanced, enhancementApplied } = await processImage(dataUrl);
+    setRawImg(raw);
+    setEnhancedImg(enhanced);
+    setPreviewImg(enhanced); // show enhanced by default
     setCaptureStep("preview");
-    const [coords, blur] = await Promise.all([gpsPromise, measureBlur(dataUrl)]);
+    const [coords, blur] = await Promise.all([gpsPromise, measureBlur(enhanced)]);
     setBlurScore(blur); setBlurWarning(blur < 80);
     if (coords) { setGpsData(coords); setGpsStatus("ok"); } else setGpsStatus("failed");
   }
@@ -838,9 +922,12 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = async (ev) => {
       const dataUrl = ev.target.result;
-      setPreviewImg(dataUrl);
+      const { raw, enhanced } = await processImage(dataUrl);
+      setRawImg(raw);
+      setEnhancedImg(enhanced);
+      setPreviewImg(enhanced);
       setCaptureStep("preview");
-      const [coords, blur] = await Promise.all([gpsPromise, measureBlur(dataUrl)]);
+      const [coords, blur] = await Promise.all([gpsPromise, measureBlur(enhanced)]);
       setBlurScore(blur); setBlurWarning(blur<80);
       if (coords) { setGpsData(coords); setGpsStatus("ok"); } else setGpsStatus("failed");
     };
@@ -869,19 +956,24 @@ export default function App() {
     const myLoads = tickets.filter(t=>t.driverName===driverName&&new Date(t.timestamp).toDateString()===today);
     const tempTicket={id:"temp",data:editData,blurScore};
     const flags=buildFlags(tempTicket,tickets);
-    const imgToSave=previewImg;
     const ticket={
       id:`ticket:${driverName}-${Date.now()}`,
       driverName, loadNumber:myLoads.length+1,
       timestamp:new Date().toISOString(),
-      image:imgToSave,
+      image:enhancedImg||previewImg, // display image = enhanced
+      imageRaw:rawImg||previewImg,
+      imageEnhanced:enhancedImg||previewImg,
       data:editData, gps:gpsData||null,
       blurScore, flags, flagged:flags.length>0,
     };
     try {
       const {error}=await supabase.from("tickets").insert({
         id:ticket.id, driver_name:ticket.driverName, load_number:ticket.loadNumber,
-        timestamp:ticket.timestamp, image:ticket.image, 
+        timestamp:ticket.timestamp,
+        image:ticket.image,
+        image_raw:ticket.imageRaw,
+        image_enhanced:ticket.imageEnhanced,
+        enhancement_applied:"auto",
         data:ticket.data, gps:ticket.gps, blur_score:ticket.blurScore,
         flags:ticket.flags, flagged:ticket.flagged,
       });
