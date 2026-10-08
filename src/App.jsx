@@ -390,7 +390,7 @@ const SS = {
   scannerWrap: { position:"fixed", inset:0, background:"#000", zIndex:200, display:"flex", flexDirection:"column" },
   video: { position:"absolute", inset:0, width:"100%", height:"100%", objectFit:"cover" },
   overlay: { position:"absolute", inset:0, width:"100%", height:"100%", pointerEvents:"none", objectFit:"cover" },
-  guideFrame: { position:"absolute", inset:"15%", border:"2px solid rgba(255,255,255,0.3)", borderRadius:8, pointerEvents:"none" },
+  guideFrame: { position:"absolute", top:"30%", bottom:"30%", left:"5%", right:"5%", border:"2px solid rgba(255,255,255,0.3)", borderRadius:8, pointerEvents:"none" },
   guideCorner: { position:"absolute", width:24, height:24, borderColor:"#fff", borderStyle:"solid" },
   guideCornerTL: { top:-2, left:-2, borderWidth:"3px 0 0 3px", borderRadius:"4px 0 0 0" },
   guideCornerTR: { top:-2, right:-2, borderWidth:"3px 3px 0 0", borderRadius:"0 4px 0 0" },
