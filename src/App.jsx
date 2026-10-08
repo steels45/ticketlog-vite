@@ -936,33 +936,89 @@ export default function App() {
           }
           enhCtx.putImageData(imageData, 0, 0);
         } else if (enhancementMode === "high") {
-          // ── High: grayscale + adaptive threshold ────────────────────────
+          // ── High: background normalization + adaptive threshold + unsharp mask
           const imageData = enhCtx.getImageData(0, 0, enhCanvas.width, enhCanvas.height);
           const d = imageData.data;
           const W = enhCanvas.width, H = enhCanvas.height;
-          // Convert to grayscale
-          const gray = new Uint8Array(W * H);
-          for (let i = 0; i < d.length; i += 4) {
+
+          // Step 1: Sample background color from corners (paper color detection)
+          const sampleCorner = (x, y, size=20) => {
+            let r=0,g=0,b=0,n=0;
+            for (let dy=0;dy<size;dy++) for (let dx=0;dx<size;dx++) {
+              const i=((y+dy)*W+(x+dx))*4;
+              if (i>=0&&i<d.length-3){r+=d[i];g+=d[i+1];b+=d[i+2];n++;}
+            }
+            return n>0?[r/n,g/n,b/n]:[255,255,255];
+          };
+          const corners = [
+            sampleCorner(0,0), sampleCorner(W-20,0),
+            sampleCorner(0,H-20), sampleCorner(W-20,H-20)
+          ];
+          const bgR = corners.reduce((s,c)=>s+c[0],0)/4;
+          const bgG = corners.reduce((s,c)=>s+c[1],0)/4;
+          const bgB = corners.reduce((s,c)=>s+c[2],0)/4;
+
+          // Step 2: Color normalization — remap background → white
+          // Scale each channel so background maps to 255
+          const scaleR = bgR > 10 ? 255/bgR : 1;
+          const scaleG = bgG > 10 ? 255/bgG : 1;
+          const scaleB = bgB > 10 ? 255/bgB : 1;
+          for (let i=0;i<d.length;i+=4) {
+            d[i]   = Math.min(255, Math.round(d[i]   * scaleR));
+            d[i+1] = Math.min(255, Math.round(d[i+1] * scaleG));
+            d[i+2] = Math.min(255, Math.round(d[i+2] * scaleB));
+          }
+
+          // Step 3: Convert to grayscale
+          const gray = new Uint8Array(W*H);
+          for (let i=0;i<d.length;i+=4) {
             gray[i/4] = Math.round(0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2]);
           }
-          // Simple adaptive threshold — compare to local mean
-          const R = 15; // radius
-          for (let y = 0; y < H; y++) {
-            for (let x = 0; x < W; x++) {
-              let sum = 0, count = 0;
-              for (let dy = -R; dy <= R; dy++) {
-                for (let dx = -R; dx <= R; dx++) {
-                  const nx = x+dx, ny = y+dy;
-                  if (nx>=0&&nx<W&&ny>=0&&ny<H) { sum+=gray[ny*W+nx]; count++; }
-                }
-              }
-              const threshold = sum/count - 8;
-              const val = gray[y*W+x] > threshold ? 255 : 0;
-              const i = (y*W+x)*4;
+
+          // Step 4: Integral image for fast adaptive threshold
+          const integral = new Float64Array((W+1)*(H+1));
+          for (let y=0;y<H;y++) for (let x=0;x<W;x++) {
+            integral[(y+1)*(W+1)+(x+1)] =
+              gray[y*W+x]
+              + integral[y*(W+1)+(x+1)]
+              + integral[(y+1)*(W+1)+x]
+              - integral[y*(W+1)+x];
+          }
+          const R = 20; // larger radius = better for document text
+          for (let y=0;y<H;y++) {
+            for (let x=0;x<W;x++) {
+              const x1=Math.max(0,x-R), y1=Math.max(0,y-R);
+              const x2=Math.min(W-1,x+R), y2=Math.min(H-1,y+R);
+              const count=(x2-x1)*(y2-y1);
+              const sum=integral[(y2+1)*(W+1)+(x2+1)]
+                - integral[y1*(W+1)+(x2+1)]
+                - integral[(y2+1)*(W+1)+x1]
+                + integral[y1*(W+1)+x1];
+              const mean=sum/count;
+              const val = gray[y*W+x] < mean*0.85 ? 0 : 255;
+              const i=(y*W+x)*4;
               d[i]=d[i+1]=d[i+2]=val; d[i+3]=255;
             }
           }
           enhCtx.putImageData(imageData, 0, 0);
+
+          // Step 5: Unsharp mask — sharpen text edges
+          const sharpData = enhCtx.getImageData(0, 0, W, H);
+          const sd = sharpData.data;
+          const blurCanvas = document.createElement("canvas");
+          blurCanvas.width=W; blurCanvas.height=H;
+          const blurCtx = blurCanvas.getContext("2d");
+          blurCtx.filter = "blur(1px)";
+          blurCtx.drawImage(enhCanvas, 0, 0);
+          const blurData = blurCtx.getImageData(0,0,W,H).data;
+          const STRENGTH = 1.5;
+          for (let i=0;i<sd.length;i+=4) {
+            for (let c=0;c<3;c++) {
+              const sharp = sd[i+c] + STRENGTH*(sd[i+c]-blurData[i+c]);
+              sd[i+c] = Math.min(255,Math.max(0,Math.round(sharp)));
+            }
+          }
+          enhCtx.putImageData(sharpData, 0, 0);
         }
 
         const enhanced = enhCanvas.toDataURL("image/jpeg", 0.92);
