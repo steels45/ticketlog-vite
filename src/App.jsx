@@ -217,9 +217,16 @@ function LiveDocumentScanner({ onCapture, onClose, stabilityMs = 800, autoCaptur
       // ── Stability → auto capture ──────────────────────────────────────────
       if (displayCorners) {
         const s = stableRef.current;
+        const currentProgress = stabilityProgress;
+
+        // Drift threshold — tighter when nearly complete (lock period at 80%)
+        const driftThreshold = currentProgress >= 0.8 ? 40 : 15;
+
         const same = s.corners && displayCorners.every((c, i) =>
-          Math.abs(c.x - s.corners[i].x) < 8 && Math.abs(c.y - s.corners[i].y) < 8
+          Math.abs(c.x - s.corners[i].x) < driftThreshold &&
+          Math.abs(c.y - s.corners[i].y) < driftThreshold
         );
+
         if (same) {
           const elapsed = Date.now() - s.since;
           const progress = Math.min(elapsed / stabilityMs, 1);
@@ -232,14 +239,19 @@ function LiveDocumentScanner({ onCapture, onClose, stabilityMs = 800, autoCaptur
             doCapture(displayCorners, canvas, vw, vh);
           }
         } else {
-          stableRef.current = { corners: displayCorners, since: Date.now() };
-          setStabilityProgress(0);
+          // Gradual decay instead of instant reset
+          const decayed = Math.max(0, currentProgress - 0.15);
+          setStabilityProgress(decayed);
+          if (decayed === 0) {
+            // Only reset the timer when fully decayed
+            stableRef.current = { corners: displayCorners, since: Date.now() };
+          }
         }
         setDetected(true);
         setStatus(autoCapture ? "Hold still…" : "Tap to capture");
       } else {
         stableRef.current = { corners: null, since: null };
-        setStabilityProgress(0);
+        setStabilityProgress(prev => Math.max(0, prev - 0.15)); // gradual decay on no detection too
         setDetected(false);
         setStatus("Point camera at ticket");
       }
