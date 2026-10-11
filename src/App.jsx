@@ -215,6 +215,33 @@ function LiveDocumentScanner({ onCapture, onClose, stabilityMs = 800, autoCaptur
       updateOverlay(displayCorners, vw, vh);
 
       // ── Stability → auto capture ──────────────────────────────────────────
+      // ── Per-frame blur check ──────────────────────────────────────────────
+      // Fast Laplacian variance on downsampled canvas — no dataUrl encoding needed
+      let frameSharp = true;
+      try {
+        const blurCtx = canvas.getContext("2d");
+        const sample = blurCtx.getImageData(
+          Math.floor(dw*0.25), Math.floor(dh*0.25),
+          Math.floor(dw*0.5), Math.floor(dh*0.5)
+        );
+        const bd = sample.data;
+        const bw = Math.floor(dw*0.5), bh = Math.floor(dh*0.5);
+        let sum=0, sumSq=0, n=0;
+        for (let y=1;y<bh-1;y++) for (let x=1;x<bw-1;x++) {
+          const idx=(y*bw+x)*4;
+          const gray=0.299*bd[idx]+0.587*bd[idx+1]+0.114*bd[idx+2];
+          const top=0.299*bd[((y-1)*bw+x)*4]+0.587*bd[((y-1)*bw+x)*4+1]+0.114*bd[((y-1)*bw+x)*4+2];
+          const bot=0.299*bd[((y+1)*bw+x)*4]+0.587*bd[((y+1)*bw+x)*4+1]+0.114*bd[((y+1)*bw+x)*4+2];
+          const lft=0.299*bd[(y*bw+x-1)*4]+0.587*bd[(y*bw+x-1)*4+1]+0.114*bd[(y*bw+x-1)*4+2];
+          const rgt=0.299*bd[(y*bw+x+1)*4]+0.587*bd[(y*bw+x+1)*4+1]+0.114*bd[(y*bw+x+1)*4+2];
+          const lap=Math.abs(-top-bot-lft-rgt+4*gray);
+          sum+=lap; sumSq+=lap*lap; n++;
+        }
+        const mean=sum/n;
+        const variance=sumSq/n-mean*mean;
+        frameSharp = variance > 60; // threshold — below this = blurry frame
+      } catch {}
+
       if (displayCorners) {
         const s = stableRef.current;
         const currentProgress = stabilityProgress;
@@ -227,7 +254,7 @@ function LiveDocumentScanner({ onCapture, onClose, stabilityMs = 800, autoCaptur
           Math.abs(c.y - s.corners[i].y) < driftThreshold
         );
 
-        if (same) {
+        if (same && frameSharp) {
           const elapsed = Date.now() - s.since;
           const progress = Math.min(elapsed / stabilityMs, 1);
           setStabilityProgress(progress);
@@ -238,17 +265,20 @@ function LiveDocumentScanner({ onCapture, onClose, stabilityMs = 800, autoCaptur
             setTimeout(() => setFlash(false), 150);
             doCapture(displayCorners, canvas, vw, vh);
           }
+        } else if (same && !frameSharp) {
+          // Corners stable but blurry — pause ring without resetting timer
+          // Slight decay to give visual feedback something is wrong
+          setStabilityProgress(prev => Math.max(0, prev - 0.05));
         } else {
-          // Gradual decay instead of instant reset
+          // Corners moved — gradual decay
           const decayed = Math.max(0, currentProgress - 0.15);
           setStabilityProgress(decayed);
           if (decayed === 0) {
-            // Only reset the timer when fully decayed
             stableRef.current = { corners: displayCorners, since: Date.now() };
           }
         }
         setDetected(true);
-        setStatus(autoCapture ? "Hold still…" : "Tap to capture");
+        setStatus(!frameSharp ? "Focus camera…" : autoCapture ? "Hold still…" : "Tap to capture");
       } else {
         stableRef.current = { corners: null, since: null };
         setStabilityProgress(prev => Math.max(0, prev - 0.15)); // gradual decay on no detection too
