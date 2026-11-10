@@ -48,7 +48,7 @@ const JPEG_QUALITY = 0.85;
 const STABILITY_MS = 600; // reduced from 800ms
 
 // ── LIVE DOCUMENT SCANNER (powered by Scanic) ─────────────────────────────
-function LiveDocumentScanner({ onCapture, onClose, stabilityMs = 800, autoCapture = true }) {
+function LiveDocumentScanner({ onCapture, onClose, stabilityMs = 800, autoCapture = true, blurThreshold = 85 }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayRef = useRef(null);
@@ -239,7 +239,7 @@ function LiveDocumentScanner({ onCapture, onClose, stabilityMs = 800, autoCaptur
         }
         const mean=sum/n;
         const variance=sumSq/n-mean*mean;
-        frameSharp = variance > 60; // threshold — below this = blurry frame
+        frameSharp = variance > blurThreshold; // admin-configurable
       } catch {}
 
       if (displayCorners) {
@@ -721,6 +721,7 @@ export default function App() {
   const [autoCapture, setAutoCapture] = useState(true);
   const [stabilityMs, setStabilityMs] = useState(800);
   const [defaultImageView, setDefaultImageView] = useState("enhanced"); // enhanced | raw
+  const [blurThreshold, setBlurThreshold] = useState(85);
   const [settingsSaved, setSettingsSaved] = useState(false);
   const [brokerFilter, setBrokerFilter] = useState("all"); // all | unassigned | broker name
   // Brokers
@@ -779,6 +780,7 @@ export default function App() {
           setAutoCapture(settings.auto_capture !== false);
           setStabilityMs(settings.stability_ms || 800);
           setDefaultImageView(settings.default_image_view || "enhanced");
+          setBlurThreshold(settings.blur_threshold || 85);
         }
         const ap = localStorage.getItem("adminPin");
         if (ap) setAdminPin(ap);
@@ -891,6 +893,7 @@ export default function App() {
         auto_capture: autoCapture,
         stability_ms: stabilityMs,
         default_image_view: defaultImageView,
+        blur_threshold: blurThreshold,
         updated_at: new Date().toISOString(),
       });
       setSettingsSaved(true);
@@ -1265,6 +1268,7 @@ export default function App() {
             onClose={()=>setScannerOpen(false)}
             stabilityMs={stabilityMs}
             autoCapture={autoCapture}
+            blurThreshold={blurThreshold}
           />
         )}
 
@@ -1549,6 +1553,27 @@ export default function App() {
                   <button key={opt.value} style={{...S.settingsOption,...(stabilityMs===opt.value?S.settingsOptionActive:{})}}
                     onClick={()=>setStabilityMs(opt.value)}>
                     <div style={{...S.settingsRadio,...(stabilityMs===opt.value?S.settingsRadioActive:{})}}/>
+                    <div>
+                      <div style={S.settingsOptionLabel}>{opt.label}</div>
+                      <div style={S.settingsOptionDesc}>{opt.desc}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+
+              {/* Capture Quality */}
+              <div style={S.settingsSection}>
+                <div style={S.settingsSectionTitle}>Capture Quality — Blur Sensitivity</div>
+                {[
+                  { value:60,  label:"Low (60)",      desc:"Accepts slightly soft images" },
+                  { value:75,  label:"Medium (75)",   desc:"Balanced" },
+                  { value:85,  label:"Standard (85)", desc:"Recommended" },
+                  { value:100, label:"Strict (100)",  desc:"Sharp captures only" },
+                  { value:110, label:"High (110)",    desc:"Strictest — needs good lighting" },
+                ].map(opt=>(
+                  <button key={opt.value} style={{...S.settingsOption,...(blurThreshold===opt.value?S.settingsOptionActive:{})}}
+                    onClick={()=>setBlurThreshold(opt.value)}>
+                    <div style={{...S.settingsRadio,...(blurThreshold===opt.value?S.settingsRadioActive:{})}}/>
                     <div>
                       <div style={S.settingsOptionLabel}>{opt.label}</div>
                       <div style={S.settingsOptionDesc}>{opt.desc}</div>
