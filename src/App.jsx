@@ -21,22 +21,43 @@ function formatDateShort(iso) {
   return new Date(iso).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
 }
 
-// Pay period: Friday → Thursday
-function getPayPeriod(offset = 0) {
+// Submission week: Monday → Sunday (week ends every Sunday)
+function getSubmissionWeek(offset = 0) {
   const now = new Date();
-  const day = now.getDay(); // 0=Sun, 5=Fri
-  const diffToFriday = (day >= 5) ? day - 5 : day + 2;
-  const friday = new Date(now);
-  friday.setDate(now.getDate() - diffToFriday + offset * 7);
-  friday.setHours(0, 0, 0, 0);
-  const thursday = new Date(friday);
-  thursday.setDate(friday.getDate() + 6);
-  thursday.setHours(23, 59, 59, 999);
-  return { start: friday, end: thursday };
+  const diffToMonday = (now.getDay() + 6) % 7; // Mon=0 … Sun=6
+  const monday = new Date(now);
+  monday.setDate(now.getDate() - diffToMonday + offset * 7);
+  monday.setHours(0, 0, 0, 0);
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  sunday.setHours(23, 59, 59, 999);
+  return { start: monday, end: sunday };
 }
 function inPeriod(timestamp, period) {
   const d = new Date(timestamp);
   return d >= period.start && d <= period.end;
+}
+
+// Ticket date: the date printed on the ticket (data.date) decides which day and week a
+// ticket belongs to. Capture time is used only when the printed date is missing or unreadable.
+const MONTH_INDEX = {jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
+function parseTicketDate(str) {
+  if (!str || typeof str !== "string") return null;
+  let y, m, d, r;
+  if ((r = str.match(/(\d{4})-(\d{1,2})-(\d{1,2})/))) { y=+r[1]; m=+r[2]-1; d=+r[3]; }
+  else if ((r = str.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4}|\d{2})\b/))) { m=+r[1]-1; d=+r[2]; y=+r[3]; if (r[3].length===2) y+=2000; }
+  else if ((r = str.match(/([A-Za-z]{3})[A-Za-z]*\.?\s+(\d{1,2}),?\s+(\d{4})/))) { m=MONTH_INDEX[r[1].toLowerCase()]; d=+r[2]; y=+r[3]; }
+  else return null;
+  if (m===undefined || y<2000 || y>2100) return null;
+  const dt = new Date(y, m, d);
+  return dt.getFullYear()===y && dt.getMonth()===m && dt.getDate()===d ? dt : null;
+}
+function ticketDay(t) {
+  const x = parseTicketDate(t.data?.date) || new Date(t.timestamp);
+  return new Date(x.getFullYear(), x.getMonth(), x.getDate());
+}
+function weekEndingLabel(period) {
+  return `Week ending ${period.end.toLocaleDateString([],{weekday:"short",month:"short",day:"numeric"})}`;
 }
 function periodLabel(period) {
   return `${period.start.toLocaleDateString([],{month:"short",day:"numeric"})} – ${period.end.toLocaleDateString([],{month:"short",day:"numeric",year:"numeric"})}`;
@@ -594,16 +615,20 @@ function buildFlags(ticket, allTickets) {
     const dup = allTickets.find(t=>t.id!==ticket.id&&t.data?.ticketNumber===ticket.data.ticketNumber&&t.data?.supplier===ticket.data.supplier);
     if (dup) flags.push({ id:"dup", label:`Duplicate ticket # (${dup.driverName})`, icon:"⚠️", color:"#dc2626" });
   }
-  if (ticket.data?.date && ticket.timestamp) {
-    try {
-      const captureDate = new Date(ticket.timestamp);
-      const ticketDateRaw = ticket.data.date.replace(/(\d+)\/(\d+)\/(\d{2})$/,"$1/$2/20$3");
-      const ticketDate = new Date(ticketDateRaw);
-      if (!isNaN(ticketDate.getTime()) && ticketDate.toDateString()!==captureDate.toDateString()) {
-        const diffDays = Math.round((captureDate-ticketDate)/(1000*60*60*24));
-        flags.push({ id:"dateshift", label: diffDays===1?"Ticket dated yesterday":`Ticket dated ${diffDays} days ago (${ticket.data.date})`, icon:"📅", color:"#d97706" });
-      }
-    } catch {}
+  if (ticket.timestamp) {
+    const printed = parseTicketDate(ticket.data?.date);
+    const cap = new Date(ticket.timestamp);
+    const capDay = new Date(cap.getFullYear(), cap.getMonth(), cap.getDate());
+    if (!printed) {
+      flags.push({ id:"dateshift", label:"Ticket date missing or unreadable", icon:"📅", color:"#d97706" });
+    } else if (printed.getTime() !== capDay.getTime()) {
+      const diff = Math.round((capDay - printed) / 86400000); // + = dated in the past
+      const label = diff===1 ? "Ticket dated yesterday"
+        : diff>1 ? `Ticket dated ${diff} days ago (${ticket.data.date})`
+        : diff===-1 ? "Ticket dated tomorrow"
+        : `Ticket dated ${-diff} days ahead (${ticket.data.date})`;
+      flags.push({ id:"dateshift", label, icon:"📅", color:"#d97706" });
+    }
   }
   return flags;
 }
@@ -633,6 +658,7 @@ function exportCSV(tickets) {
 function exportImagePDF(tickets, label, broker=null) {
   const sorted=[...tickets].sort((a,b)=>{
     if(a.driverName!==b.driverName) return a.driverName.localeCompare(b.driverName);
+    const byDay=ticketDay(a)-ticketDay(b); if(byDay) return byDay;
     if(a.timestamp!==b.timestamp) return new Date(a.timestamp)-new Date(b.timestamp);
     return a.loadNumber-b.loadNumber;
   });
@@ -643,7 +669,7 @@ function exportImagePDF(tickets, label, broker=null) {
         <span class="driver">${t.driverName}</span>
         <span class="load">${ordinal(t.loadNumber)} Load</span>
         <span class="sup">${t.data?.supplier||""} ${t.data?.ticketNumber?"· #"+t.data.ticketNumber:""}</span>
-        <span class="ts">${formatDateShort(t.timestamp)} ${formatTime(t.timestamp)}</span>
+        <span class="ts">${formatDateShort(ticketDay(t))} ${formatTime(t.timestamp)}</span>
       </div>
       <div class="iw"><img src="${img}" /></div>
       <div class="pf">Net Tons: <strong>${t.data?.netTons||"—"}</strong> · Truck: <strong>${t.data?.truckNumber||"—"}</strong> · Material: <strong>${t.data?.product||"—"}</strong>${(t.flags||[]).length>0?` · <span style="color:#d97706">⚠️ ${t.flags.map(f=>f.label).join(", ")}</span>`:""}</div>
@@ -721,6 +747,7 @@ export default function App() {
   // Driver tabs
   const [driverTab, setDriverTab] = useState("capture"); // capture | period
   const [periodOffset, setPeriodOffset] = useState(0);
+  const [selectedDay, setSelectedDay] = useState(null); // 0=Mon … 6=Sun, null = auto
   // Admin
   const [adminTab, setAdminTab] = useState("tickets"); // tickets | export | roster
   const [adminPeriodOffset, setAdminPeriodOffset] = useState(0);
@@ -1140,12 +1167,13 @@ export default function App() {
     const cleanData={...editData};
     const remarks=(cleanData.driverRemarks||"").trim();
     if (remarks) cleanData.driverRemarks=remarks; else delete cleanData.driverRemarks;
-    const tempTicket={id:"temp",data:cleanData,blurScore};
+    const savedAt=new Date().toISOString();
+    const tempTicket={id:"temp",data:cleanData,blurScore,timestamp:savedAt};
     const flags=buildFlags(tempTicket,tickets);
     const ticket={
       id:`ticket:${driverName}-${Date.now()}`,
       driverName, loadNumber:myLoads.length+1,
-      timestamp:new Date().toISOString(),
+      timestamp:savedAt,
       image:enhancedImg||previewImg, // display image = enhanced
       imageRaw:rawImg||previewImg,
       imageEnhanced:enhancedImg||previewImg,
@@ -1171,13 +1199,24 @@ export default function App() {
   }
 
   // ── COMPUTED ──────────────────────────────────────────────────────────────
-  const currentPeriod = getPayPeriod(periodOffset);
-  const adminPeriod = getPayPeriod(adminPeriodOffset);
-  const myPeriodTickets = tickets.filter(t=>t.driverName===driverName&&inPeriod(t.timestamp,currentPeriod));
+  const currentPeriod = getSubmissionWeek(periodOffset);
+  const adminPeriod = getSubmissionWeek(adminPeriodOffset);
+  const myPeriodTickets = tickets.filter(t=>t.driverName===driverName&&inPeriod(ticketDay(t),currentPeriod));
   const myTodayTickets = tickets.filter(t=>t.driverName===driverName&&new Date(t.timestamp).toDateString()===today);
-  const adminPeriodTickets = tickets.filter(t=>inPeriod(t.timestamp,adminPeriod));
+  const adminPeriodTickets = tickets.filter(t=>inPeriod(ticketDay(t),adminPeriod));
   const totalTonnage = adminPeriodTickets.reduce((s,t)=>s+(parseFloat(t.data?.netTons)||0),0);
   const flagged = adminPeriodTickets.filter(t=>t.flagged);
+  // Driver week strip: seven days Mon→Sun, loads per day, auto-selected day
+  const weekDays = Array.from({length:7},(_,i)=>{ const d=new Date(currentPeriod.start); d.setDate(d.getDate()+i); return d; });
+  const loadsByDay = weekDays.map(d=>myPeriodTickets
+    .filter(t=>ticketDay(t).toDateString()===d.toDateString())
+    .sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp)));
+  const todayIdx = weekDays.findIndex(d=>d.toDateString()===today);
+  const lastLoadIdx = loadsByDay.reduce((acc,l,i)=>l.length?i:acc,-1);
+  const autoDay = todayIdx>=0 ? todayIdx : (lastLoadIdx>=0 ? lastLoadIdx : 6);
+  const activeDay = selectedDay!==null ? selectedDay : autoDay;
+  const dayLoads = loadsByDay[activeDay]||[];
+  const dayTons = dayLoads.reduce((sum,t)=>sum+(parseFloat(t.data?.netTons)||0),0);
 
   // ── SPLASH ────────────────────────────────────────────────────────────────
   if (authState==="splash") return (
@@ -1250,6 +1289,9 @@ export default function App() {
   // ── DRIVER APP ────────────────────────────────────────────────────────────
   if (authState==="driver") {
     const displayImg = previewImg;
+    const printedDay = parseTicketDate(editData.date);
+    const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+    const dateOff = captureStep==="review" && (!printedDay || printedDay.getTime()!==todayStart.getTime());
     const driverUnit = roster.find(d=>d.name===driverName)?.unit||null;
     return (
       <div style={S.app}>
@@ -1386,6 +1428,14 @@ export default function App() {
                     <span style={{fontSize:13,color:"#dc2626",fontWeight:600}}>No signature or stamp detected. Ticket will be flagged.</span>
                   </div>
                 )}
+                {dateOff&&(
+                  <div style={{...S.warnChip,borderColor:"#fde68a",background:"#fef3c7"}}>
+                    <CalendarIcon size={16} color="#d97706" />
+                    <span style={{fontSize:13,color:"#b45309",fontWeight:600}}>
+                      {printedDay?`Ticket is dated ${printedDay.toLocaleDateString([],{month:"short",day:"numeric"})}, not today. Ticket will be flagged.`:"Ticket date couldn't be read. Ticket will be flagged."}
+                    </span>
+                  </div>
+                )}
                 <div style={S.fieldWrap}>
                   <label style={S.fieldLabel}>Driver Remarks</label>
                   <textarea style={S.remarksInput} rows={3} maxLength={500}
@@ -1418,12 +1468,12 @@ export default function App() {
         {driverTab==="period" && (
           <div style={S.periodWrap}>
             <div style={S.periodNav}>
-              <button style={S.periodNavBtn} onClick={()=>setPeriodOffset(p=>p-1)}>‹</button>
+              <button style={S.periodNavBtn} onClick={()=>{setPeriodOffset(p=>p-1);setSelectedDay(null);}}>‹</button>
               <div style={S.periodNavCenter}>
                 <div style={S.periodNavLabel}>{periodOffset===0?"This Week":periodOffset===-1?"Last Week":`${Math.abs(periodOffset)} weeks ago`}</div>
-                <div style={S.periodNavDates}>{periodLabel(currentPeriod)}</div>
+                <div style={S.periodNavDates}>{weekEndingLabel(currentPeriod)}</div>
               </div>
-              <button style={{...S.periodNavBtn,...(periodOffset===0?{opacity:.3,pointerEvents:"none"}:{})}} onClick={()=>setPeriodOffset(p=>p+1)}>›</button>
+              <button style={{...S.periodNavBtn,...(periodOffset===0?{opacity:.3,pointerEvents:"none"}:{})}} onClick={()=>{setPeriodOffset(p=>p+1);setSelectedDay(null);}}>›</button>
             </div>
 
             {/* Period summary */}
@@ -1439,20 +1489,43 @@ export default function App() {
               </div>
               <div style={S.periodSummaryDivider}/>
               <div style={S.periodSummaryItem}>
-                <div style={S.periodSummaryNum}>{[...new Set(myPeriodTickets.map(t=>new Date(t.timestamp).toDateString()))].length}</div>
+                <div style={S.periodSummaryNum}>{[...new Set(myPeriodTickets.map(t=>ticketDay(t).toDateString()))].length}</div>
                 <div style={S.periodSummaryLabel}>Days</div>
               </div>
             </div>
 
-            {/* Ticket list */}
-            {myPeriodTickets.length===0?(
+            {/* Week strip */}
+            <div style={S.dayStripCard}>
+              <div style={S.dayStrip}>
+                {weekDays.map((d,i)=>{
+                  const active=i===activeDay;
+                  const isToday=i===todayIdx;
+                  return (
+                    <button key={i} style={{...S.dayBtn,...(active?S.dayBtnActive:{})}} onClick={()=>setSelectedDay(i)}
+                      aria-label={`${d.toLocaleDateString([],{weekday:"long",month:"long",day:"numeric"})}, ${loadsByDay[i].length} loads`}>
+                      <span style={S.dayLetter}>{["M","T","W","T","F","S","S"][i]}</span>
+                      <span style={{...S.dayNum,...(active||isToday?{color:C.navy,fontWeight:800}:{})}}>{d.getDate()}</span>
+                      <span style={{...S.dayDot,...(loadsByDay[i].length?S.dayDotOn:{})}}/>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Selected day */}
+            <div style={S.daySummary}>
+              <span style={S.daySummaryDate}>{weekDays[activeDay].toLocaleDateString([],{weekday:"long",month:"short",day:"numeric"})}</span>
+              <span style={S.daySummaryVal}>{dayLoads.length} load{dayLoads.length!==1?"s":""} · {dayTons.toFixed(1)} tons</span>
+            </div>
+
+            {dayLoads.length===0?(
               <div style={S.emptyState}>
-                <div style={S.emptyIcon}>📋</div>
-                <div style={S.emptyText}>No loads this period</div>
+                <div style={S.emptyIcon}><ListIcon size={32} color="#94a3b8" /></div>
+                <div style={S.emptyText}>No loads this day</div>
               </div>
             ):(
               <div style={S.ticketList}>
-                {[...myPeriodTickets].sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp)).map(t=>(
+                {dayLoads.map(t=>(
                   <DriverTicketCard key={t.id} ticket={t} onClick={()=>setSelectedTicket(t)} />
                 ))}
               </div>
@@ -1906,6 +1979,13 @@ function PackageIcon(props) {
   );
 }
 
+function CalendarIcon(props) {
+  return (
+    <LineIcon {...props}>
+      <rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/>
+    </LineIcon>
+  );
+}
 function NoteIcon(props) {
   return (
     <LineIcon {...props}>
@@ -1968,7 +2048,7 @@ function DriverTicketCard({ticket,onClick}) {
           {ticket.data?.truckNumber&&<span style={S.metaItem}><TruckIcon2 size={14} color="#64748b" />{ticket.data.truckNumber}</span>}
           {ticket.data?.product&&<span style={S.metaItem}><PackageIcon size={14} color="#64748b" />{ticket.data.product}</span>}
         </div>
-        <div style={S.driverTicketTime}>{formatDateShort(ticket.timestamp)} · {formatTime(ticket.timestamp)}</div>
+        <div style={S.driverTicketTime}>{formatDateShort(ticketDay(ticket))} · Scanned {formatTime(ticket.timestamp)}</div>
       </div>
     </div>
   );
@@ -2162,8 +2242,8 @@ function ManualExport({brokers, tickets, brokerColorFn}) {
   const [endDate, setEndDate] = useState(new Date().toISOString().slice(0,10));
   const filtered = tickets.filter(t=>{
     if (broker && t.broker!==broker) return false;
-    const d=new Date(t.timestamp);
-    return d>=new Date(startDate)&&d<=new Date(endDate+"T23:59:59");
+    const d=ticketDay(t);
+    return d>=new Date(startDate+"T00:00:00")&&d<=new Date(endDate+"T23:59:59");
   });
   const bc = broker ? brokerColorFn(broker) : C.navy;
   return (
@@ -2286,6 +2366,17 @@ const S = {
   remarkCallout: { margin:"0 16px 8px", background:"#eff6ff", border:"1px solid #bfdbfe", borderRadius:10, padding:"10px 12px" },
   remarkCalloutLabel: { display:"flex", alignItems:"center", gap:6, fontSize:11, fontWeight:700, color:C.navy, textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 },
   remarkCalloutText: { fontSize:14, color:C.text, whiteSpace:"pre-wrap", wordBreak:"break-word" },
+  dayStripCard: { background:C.surface, borderRadius:12, padding:"8px 6px", border:`1px solid ${C.border}` },
+  dayStrip: { display:"flex", gap:2 },
+  dayBtn: { flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:4, padding:"8px 0", borderRadius:12, border:"none", background:"transparent", cursor:"pointer" },
+  dayBtnActive: { background:"#eef2f7" },
+  dayLetter: { fontSize:11, fontWeight:600, color:C.muted },
+  dayNum: { fontSize:18, fontWeight:600, color:C.muted },
+  dayDot: { width:5, height:5, borderRadius:"50%", background:"transparent" },
+  dayDotOn: { background:C.navy },
+  daySummary: { display:"flex", justifyContent:"space-between", alignItems:"baseline", padding:"0 4px" },
+  daySummaryDate: { fontSize:14, fontWeight:700, color:C.navy },
+  daySummaryVal: { fontSize:13, fontWeight:600, color:C.muted },
   statusRow: { display:"flex", gap:8, flexWrap:"wrap" },
   chipGood: { borderColor:"#86efac", background:"#f0fdf4" },
   chipBad: { borderColor:"#fca5a5", background:"#fef2f2" },
