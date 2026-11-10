@@ -48,7 +48,7 @@ const JPEG_QUALITY = 0.85;
 const STABILITY_MS = 600; // reduced from 800ms
 
 // ── LIVE DOCUMENT SCANNER (powered by Scanic) ─────────────────────────────
-function LiveDocumentScanner({ onCapture, onClose, stabilityMs = 800, autoCapture = true, blurThreshold = 85 }) {
+function LiveDocumentScanner({ onCapture, onClose, stabilityMs = 800, autoCapture = true, blurThreshold = 85, onPickPhoto }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayRef = useRef(null);
@@ -107,7 +107,7 @@ function LiveDocumentScanner({ onCapture, onClose, stabilityMs = 800, autoCaptur
           setStatus("Loading scanner…");
         }
       } catch {
-        if (!cancelled) setError("Camera access denied. Use the manual option below.");
+        if (!cancelled) setError("Camera unavailable");
       }
     }
     startCamera();
@@ -414,11 +414,18 @@ function LiveDocumentScanner({ onCapture, onClose, stabilityMs = 800, autoCaptur
         </div>
       )}
 
+      {/* Fallback when the camera can't start */}
+      {error && onPickPhoto && (
+        <div style={SS.fallbackWrap}>
+          <button style={SS.fallbackBtn} onClick={onPickPhoto}>Choose from photos</button>
+        </div>
+      )}
+
       {/* Controls */}
       <div style={SS.controls}>
         <button style={SS.closeBtn} onClick={onClose}>✕ Cancel</button>
         <button style={{...SS.captureBtn,...(capturing ? SS.captureBtnCapturing : {})}}
-          onClick={manualCapture} disabled={capturing}>
+          onClick={manualCapture} disabled={capturing||!!error}>
           <div style={SS.captureRing}><div style={SS.captureInner}/></div>
         </button>
         <div style={{width:80}}/>
@@ -442,6 +449,8 @@ const SS = {
   statusDot: { width:8, height:8, borderRadius:"50%", background:"#94a3b8", flexShrink:0 },
   statusDotGreen: { background:"#22c55e", boxShadow:"0 0 6px #22c55e" },
   statusText: { color:"#fff", fontSize:14, fontWeight:600 },
+  fallbackWrap: { position:"absolute", top:"50%", left:"50%", transform:"translate(-50%,-50%)", zIndex:5 },
+  fallbackBtn: { background:"#fff", color:"#1e3a5f", border:"none", borderRadius:12, padding:"14px 24px", fontSize:16, fontWeight:700, cursor:"pointer" },
   loadingBadge: { marginLeft:"auto", fontSize:11, color:"rgba(255,255,255,.6)", background:"rgba(255,255,255,.1)", padding:"3px 10px", borderRadius:20 },
   stabilityWrap: { display:"none" }, // replaced by ring
   stabilityBar: { display:"none" }, // replaced by ring
@@ -601,7 +610,7 @@ function buildFlags(ticket, allTickets) {
 
 // ── EXPORTS ───────────────────────────────────────────────────────────────
 function exportCSV(tickets) {
-  const headers = ["Load #","Driver","Captured Date","Captured Time","Supplier","Ticket #","Ticket Date","Ticket Time","Customer","Order #","PO Number","Job Site","Location","Truck #","Carrier","Material","Gross Tons","Tare Tons","Net Tons","Weighmaster","GPS Lat","GPS Lng","Receiver Signature","Received Stamp","Flags","Notes"];
+  const headers = ["Load #","Driver","Captured Date","Captured Time","Supplier","Ticket #","Ticket Date","Ticket Time","Customer","Order #","PO Number","Job Site","Location","Truck #","Carrier","Material","Gross Tons","Tare Tons","Net Tons","Weighmaster","GPS Lat","GPS Lng","Receiver Signature","Received Stamp","Flags","Notes","Driver Remarks"];
   const rows = tickets.map(t=>[
     t.loadNumber, t.driverName, formatDate(t.timestamp), formatTime(t.timestamp),
     t.data?.supplier||"", t.data?.ticketNumber||"", t.data?.date||"", t.data?.time||"",
@@ -611,7 +620,7 @@ function exportCSV(tickets) {
     t.data?.grossTons||"", t.data?.tareTons||"", t.data?.netTons||"", t.data?.weighmaster||"",
     t.gps?.latitude||"", t.gps?.longitude||"",
     t.data?.receiverSignature?"Yes":"No", t.data?.receivedStamp?"Yes":"No",
-    (t.flags||[]).map(f=>f.label).join("; "), t.data?.notes||""
+    (t.flags||[]).map(f=>f.label).join("; "), t.data?.notes||"", t.data?.driverRemarks||""
   ]);
   const csv=[headers,...rows].map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
   const blob=new Blob([csv],{type:"text/csv"});
@@ -754,7 +763,6 @@ export default function App() {
   const [loadError, setLoadError] = useState(null);
   const [exporting, setExporting] = useState(null);
   const fileRef = useRef();
-  const nativeScanRef = useRef();
   const today = new Date().toDateString();
 
   // Inject scanner animation CSS
@@ -1121,7 +1129,7 @@ export default function App() {
         if (dup) setDuplicateWarning({ticketNumber:data.ticketNumber,supplier:data.supplier,submittedBy:dup.driverName,submittedAt:dup.timestamp});
       }
       setCaptureStep("review");
-    } catch { setLoadError("Failed to analyze. Check connection and try again."); }
+    } catch { setLoadError("Couldn't process the ticket. Check your connection and try again."); }
     setLoading(false);
   }
 
@@ -1129,7 +1137,10 @@ export default function App() {
     if (duplicateWarning&&!forceDuplicate) return;
     setSaving(true);
     const myLoads = tickets.filter(t=>t.driverName===driverName&&new Date(t.timestamp).toDateString()===today);
-    const tempTicket={id:"temp",data:editData,blurScore};
+    const cleanData={...editData};
+    const remarks=(cleanData.driverRemarks||"").trim();
+    if (remarks) cleanData.driverRemarks=remarks; else delete cleanData.driverRemarks;
+    const tempTicket={id:"temp",data:cleanData,blurScore};
     const flags=buildFlags(tempTicket,tickets);
     const ticket={
       id:`ticket:${driverName}-${Date.now()}`,
@@ -1138,7 +1149,7 @@ export default function App() {
       image:enhancedImg||previewImg, // display image = enhanced
       imageRaw:rawImg||previewImg,
       imageEnhanced:enhancedImg||previewImg,
-      data:editData, gps:gpsData||null,
+      data:cleanData, gps:gpsData||null,
       blurScore, flags, flagged:flags.length>0,
     };
     try {
@@ -1242,11 +1253,8 @@ export default function App() {
     const driverUnit = roster.find(d=>d.name===driverName)?.unit||null;
     return (
       <div style={S.app}>
-        {/* Camera capture — opens rear camera directly */}
-        <input ref={fileRef} type="file" accept="image/*" capture="environment"
-          style={{display:"none"}} onChange={handleFileSelect} />
-        {/* Native document scan — on iOS Safari triggers Apple's document scanner */}
-        <input ref={nativeScanRef} type="file" accept="image/*"
+        {/* Photo picker: fallback only, opened from the scanner when the camera can't start */}
+        <input ref={fileRef} type="file" accept="image/*"
           style={{display:"none"}} onChange={handleFileSelect} />
 
         {/* Header */}
@@ -1269,6 +1277,7 @@ export default function App() {
             stabilityMs={stabilityMs}
             autoCapture={autoCapture}
             blurThreshold={blurThreshold}
+            onPickPhoto={()=>{ setScannerOpen(false); if (fileRef.current) fileRef.current.click(); }}
           />
         )}
 
@@ -1287,14 +1296,6 @@ export default function App() {
                   <button style={S.captureBigBtn} onClick={()=>setScannerOpen(true)}>
                     <CameraIcon size={20} color="#fff" />
                     <span>Scan Ticket</span>
-                  </button>
-                  <button style={{...S.outlineBtn,width:"100%",marginTop:8,fontSize:14,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}
-                    onClick={()=>nativeScanRef.current.click()}>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
-                    Use Native Scanner
-                  </button>
-                  <button style={{...S.ghostLink,marginTop:4,fontSize:12,color:C.muted}} onClick={()=>fileRef.current.click()}>
-                    Use photo library
                   </button>
                   <div style={S.captureHint}>
                     <InfoIcon />
@@ -1317,41 +1318,40 @@ export default function App() {
                   <img src={displayImg||previewImg} alt="ticket" style={S.imgPreview} />
 </div>
 
-                {/* Status cards */}
-                <div style={S.statusStack}>
-                  {/* Blur */}
+                {/* Status chips */}
+                <div style={S.statusRow}>
                   {blurScore!==null&&(
-                    <div style={{...S.statusChip,borderColor:blurWarning?"#fca5a5":"#86efac",background:blurWarning?"#fef2f2":"#f0fdf4"}}>
-                      <span>{blurWarning?"⚠️":"✅"}</span>
-                      <span style={{fontSize:13,color:blurWarning?"#dc2626":"#16a34a",fontWeight:600}}>
-                        {blurWarning?"Blurry — consider retaking":"Image looks sharp"}
-                      </span>
+                    <div style={{...S.statusChip,...(blurWarning?S.chipBad:S.chipGood)}}
+                      role="img" aria-label={blurWarning?"Image is blurry":"Image is sharp"}>
+                      <FocusIcon size={18} color={blurWarning?"#dc2626":"#16a34a"} />
+                      {blurWarning&&<span style={{fontSize:13,color:"#dc2626",fontWeight:600}}>Blurry, retake</span>}
                     </div>
                   )}
-
-                  {/* GPS */}
-                  <div style={{...S.statusChip,borderColor:gpsStatus==="ok"?"#86efac":gpsStatus==="failed"?"#fca5a5":"#e2e8f0",background:gpsStatus==="ok"?"#f0fdf4":"#f8fafc"}}>
-                    <span style={{fontSize:10,color:gpsStatus==="ok"?"#16a34a":gpsStatus==="failed"?"#dc2626":"#94a3b8"}}>●</span>
-                    <span style={{fontSize:13,color:gpsStatus==="ok"?"#16a34a":gpsStatus==="failed"?"#dc2626":"#64748b"}}>
-                      {gpsStatus==="fetching"?"Acquiring GPS…":gpsStatus==="ok"?`GPS locked · ±${gpsData?.accuracy}m`:"GPS unavailable"}
+                  <div style={{...S.statusChip,...(gpsStatus==="ok"?S.chipGood:gpsStatus==="failed"?S.chipBad:{borderColor:"#e2e8f0"})}}>
+                    <SatelliteIcon size={18} color={gpsStatus==="ok"?"#16a34a":gpsStatus==="failed"?"#dc2626":"#94a3b8"} />
+                    <span style={{fontSize:13,fontWeight:600,color:gpsStatus==="ok"?"#16a34a":gpsStatus==="failed"?"#dc2626":"#64748b"}}>
+                      {gpsStatus==="fetching"?"Acquiring GPS…":gpsStatus==="ok"?`±${gpsData?.accuracy}m`:"GPS unavailable"}
                     </span>
                   </div>
                 </div>
 
                 {loadError&&<div style={S.errorBox}>{loadError}</div>}
 
-                <div style={S.actionRow}>
-                  {blurWarning?(
-                    <>
-                      <button style={S.solidBtn} onClick={()=>{resetCapture();setScannerOpen(true);}}>Retake</button>
-                      <button style={{...S.outlineBtn}} onClick={handleAnalyze} disabled={loading}>{loading?"Analyzing…":"Use Anyway"}</button>
-                    </>
-                  ):(
+                {blurWarning?(
+                  <div style={S.actionRow}>
+                    <button style={S.solidBtn} onClick={()=>{resetCapture();setScannerOpen(true);}}>Retake</button>
+                    <button style={S.outlineBtn} onClick={handleAnalyze} disabled={loading}>{loading?"Processing…":"Review anyway"}</button>
+                  </div>
+                ):(
+                  <>
                     <button style={{...S.solidBtn,width:"100%"}} onClick={handleAnalyze} disabled={loading}>
-                      {loading?"Analyzing ticket…":"✦ Extract Ticket Data"}
+                      {loading?"Processing…":"Review Ticket"}
                     </button>
-                  )}
-                </div>
+                    <button style={{...S.outlineBtn,width:"100%"}} onClick={()=>{resetCapture();setScannerOpen(true);}} disabled={loading}>
+                      Retake
+                    </button>
+                  </>
+                )}
                 <button style={S.ghostLink} onClick={resetCapture}>Cancel</button>
               </div>
             )}
@@ -1360,37 +1360,38 @@ export default function App() {
               <div style={S.captureStepWrap}>
                 <div style={S.reviewHeader}>
                   <img src={previewImg} alt="" style={S.reviewThumb} />
-                  <div style={S.reviewHeaderInfo}>
-                    {editData.supplier&&<div style={S.reviewSupplier}>{editData.supplier}</div>}
-                    {editData.ticketNumber&&<div style={S.reviewTicketNum}>#{editData.ticketNumber}</div>}
-                    {editData.netTons&&(
-                      <div style={S.netTonsBadge}>
-                        <span style={S.netTonsNum}>{editData.netTons}</span>
-                        <span style={S.netTonsLabel}>NET TONS</span>
+                  <div style={S.reviewFields}>
+                    {["ticketNumber","netTons","truckNumber"].map(key=>(
+                      <div key={key} style={S.fieldWrap}>
+                        <label style={S.fieldLabel}>{FIELD_LABELS[key]}</label>
+                        <input style={S.fieldInput} value={editData[key]||""}
+                          inputMode={key==="netTons"?"decimal":undefined}
+                          onChange={e=>setEditData(p=>({...p,[key]:e.target.value}))} placeholder="—" />
                       </div>
-                    )}
+                    ))}
                   </div>
                 </div>
                 {duplicateWarning&&(
                   <div style={S.dupWarning}>
-                    <div style={S.dupWarningTitle}>⚠️ Duplicate Ticket #{duplicateWarning.ticketNumber}</div>
+                    <div style={{...S.dupWarningTitle,display:"flex",alignItems:"center",gap:6}}>
+                      <WarningIcon size={16} color="#dc2626" />
+                      <span>Duplicate Ticket #{duplicateWarning.ticketNumber}</span>
+                    </div>
                     <div style={S.dupWarningText}>Already submitted by <strong>{duplicateWarning.submittedBy}</strong> at {formatTime(duplicateWarning.submittedAt)}. Verify before saving.</div>
                   </div>
                 )}
                 {editData.receiverSignature===false&&editData.receivedStamp===false&&(
                   <div style={{...S.warnChip,borderColor:"#fca5a5",background:"#fef2f2"}}>
-                    <span>✍️</span>
-                    <span style={{fontSize:13,color:"#dc2626",fontWeight:600}}>No signature or stamp detected — ticket will be flagged</span>
+                    <PenIcon size={16} color="#dc2626" />
+                    <span style={{fontSize:13,color:"#dc2626",fontWeight:600}}>No signature or stamp detected. Ticket will be flagged.</span>
                   </div>
                 )}
-                <div style={S.fieldsGrid}>
-                  {Object.entries(FIELD_LABELS).map(([key,label])=>(
-                    <div key={key} style={key==="notes"||key==="location"||key==="customer"?{...S.fieldWrap,gridColumn:"span 2"}:S.fieldWrap}>
-                      <label style={S.fieldLabel}>{label}</label>
-                      <input style={S.fieldInput} value={editData[key]||""}
-                        onChange={e=>setEditData(p=>({...p,[key]:e.target.value}))} placeholder="—" />
-                    </div>
-                  ))}
+                <div style={S.fieldWrap}>
+                  <label style={S.fieldLabel}>Driver Remarks</label>
+                  <textarea style={S.remarksInput} rows={3} maxLength={500}
+                    value={editData.driverRemarks||""}
+                    onChange={e=>setEditData(p=>({...p,driverRemarks:e.target.value}))}
+                    placeholder="Optional: note anything about this ticket" />
                 </div>
                 {loadError&&<div style={S.errorBox}>{loadError}</div>}
                 {duplicateWarning?(
@@ -1847,6 +1848,72 @@ function InfoIcon() {
 
 // ── COMPONENTS ─────────────────────────────────────────────────────────────
 
+function LineIcon({size=16,color="currentColor",children}) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{flexShrink:0}}>
+      {children}
+    </svg>
+  );
+}
+function FocusIcon(props) {
+  return (
+    <LineIcon {...props}>
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/>
+      <path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
+    </LineIcon>
+  );
+}
+function SatelliteIcon(props) {
+  return (
+    <LineIcon {...props}>
+      <path d="M13 7 9 3 5 7l4 4"/><path d="m17 11 4 4-4 4-4-4"/>
+      <path d="m8 12 4 4 6-6-4-4Z"/><path d="m16 8 3-3"/><path d="M9 21a6 6 0 0 0-6-6"/>
+    </LineIcon>
+  );
+}
+function WarningIcon(props) {
+  return (
+    <LineIcon {...props}>
+      <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/>
+      <path d="M12 9v4"/><path d="M12 17h.01"/>
+    </LineIcon>
+  );
+}
+function PenIcon(props) {
+  return (
+    <LineIcon {...props}>
+      <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/>
+    </LineIcon>
+  );
+}
+function TruckIcon2(props) {
+  return (
+    <LineIcon {...props}>
+      <path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2"/><path d="M15 18H9"/>
+      <path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.624l-3.48-4.35A1 1 0 0 0 17.52 8H14"/>
+      <circle cx="17" cy="18" r="2"/><circle cx="7" cy="18" r="2"/>
+    </LineIcon>
+  );
+}
+function PackageIcon(props) {
+  return (
+    <LineIcon {...props}>
+      <path d="m7.5 4.27 9 5.15"/>
+      <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/>
+      <path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>
+    </LineIcon>
+  );
+}
+
+function NoteIcon(props) {
+  return (
+    <LineIcon {...props}>
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    </LineIcon>
+  );
+}
+
 function GearIcon({size=20, color="#fff"}) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1894,12 +1961,12 @@ function DriverTicketCard({ticket,onClick}) {
         <div style={S.driverTicketTop}>
           <span style={S.loadPill}>{ordinal(ticket.loadNumber)}</span>
           {ticket.data?.supplier&&<span style={S.supplierText}>{ticket.data.supplier}</span>}
-          {ticket.flagged&&<span style={{fontSize:14}}>⚠️</span>}
+          {ticket.flagged&&<WarningIcon size={15} color="#d97706" />}
         </div>
         {ticket.data?.netTons&&<div style={S.driverTicketTons}>{ticket.data.netTons} <span style={{fontSize:12,fontWeight:500,color:"#64748b"}}>tons</span></div>}
         <div style={S.driverTicketMeta}>
-          {ticket.data?.truckNumber&&<span>🚛 {ticket.data.truckNumber}</span>}
-          {ticket.data?.product&&<span>📦 {ticket.data.product}</span>}
+          {ticket.data?.truckNumber&&<span style={S.metaItem}><TruckIcon2 size={14} color="#64748b" />{ticket.data.truckNumber}</span>}
+          {ticket.data?.product&&<span style={S.metaItem}><PackageIcon size={14} color="#64748b" />{ticket.data.product}</span>}
         </div>
         <div style={S.driverTicketTime}>{formatDateShort(ticket.timestamp)} · {formatTime(ticket.timestamp)}</div>
       </div>
@@ -1938,6 +2005,11 @@ function AdminTicketCard({ticket,brokers,onClick}) {
           {ticket.flags?.map(f=>(
             <span key={f.id} style={{fontSize:10,color:f.color,background:f.color+"15",padding:"1px 7px",borderRadius:20,fontWeight:600}}>{f.label}</span>
           ))}
+          {ticket.data?.driverRemarks&&(
+            <span style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:11,fontWeight:700,color:C.navy,background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:20,padding:"2px 8px"}}>
+              <NoteIcon size={12} color={C.navy} />Remark
+            </span>
+          )}
         </div>
       </div>
     </div>
@@ -1998,6 +2070,13 @@ function TicketModal({ticket,onClose,brokers,onAssignBroker,brokerColorFn,defaul
                 {f.icon} {f.label}
               </div>
             ))}
+          </div>
+        )}
+
+        {ticket.data?.driverRemarks&&(
+          <div style={S.remarkCallout}>
+            <div style={S.remarkCalloutLabel}><NoteIcon size={14} color={C.navy} />Driver Remarks</div>
+            <div style={S.remarkCalloutText}>{ticket.data.driverRemarks}</div>
           </div>
         )}
 
@@ -2203,6 +2282,15 @@ const S = {
   captureStepWrap: { display:"flex", flexDirection:"column", gap:12 },
   imgPreviewWrap: { position:"relative", background:"#000", borderRadius:14, overflow:"hidden" },
   imgPreview: { width:"100%", maxHeight:320, objectFit:"contain", display:"block" },
+  remarksInput: { background:C.bg, border:`1.5px solid ${C.border}`, borderRadius:8, padding:"9px 12px", color:C.text, fontSize:14, outline:"none", width:"100%", boxSizing:"border-box", minHeight:76, resize:"none", fontFamily:"inherit" },
+  remarkCallout: { margin:"0 16px 8px", background:"#eff6ff", border:"1px solid #bfdbfe", borderRadius:10, padding:"10px 12px" },
+  remarkCalloutLabel: { display:"flex", alignItems:"center", gap:6, fontSize:11, fontWeight:700, color:C.navy, textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 },
+  remarkCalloutText: { fontSize:14, color:C.text, whiteSpace:"pre-wrap", wordBreak:"break-word" },
+  statusRow: { display:"flex", gap:8, flexWrap:"wrap" },
+  chipGood: { borderColor:"#86efac", background:"#f0fdf4" },
+  chipBad: { borderColor:"#fca5a5", background:"#fef2f2" },
+  reviewFields: { flex:1, minWidth:0, display:"flex", flexDirection:"column", gap:8 },
+  metaItem: { display:"inline-flex", alignItems:"center", gap:4 },
   statusStack: { display:"flex", flexDirection:"column", gap:8 },
   statusChip: { display:"flex", alignItems:"center", gap:8, padding:"10px 14px", borderRadius:10, border:"1px solid", background:C.bg },
   warnChip: { display:"flex", alignItems:"center", gap:8, padding:"10px 14px", borderRadius:10, border:"1px solid" },
